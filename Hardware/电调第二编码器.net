@@ -1,0 +1,236 @@
+PROTEL NETLIST 2.0
+[
+DESIGNATOR
+U1
+FOOTPRINT
+PG-DSO-8_L5.0-W4.0-P1.27-LS6.0-BL
+PARTTYPE
+TLE5012BE1000
+DESCRIPTION
+采用巨磁电阻的角度传感器
+Component Kind
+Standard
+Unique ID
+gge46
+Add into BOM
+yes
+Convert to PCB
+yes
+Symbol
+TLE5012BE1000XUMA1
+Designator
+U1
+Device
+TLE5012BE1000
+Name
+TLE5012BE1000
+Reuse Block
+
+Group ID
+
+Channel ID
+
+LCSC Part Name
+基于GMR的角度传感器
+Supplier Part
+C123083
+Manufacturer
+Infineon(英飞凌)
+Manufacturer Part
+TLE5012BE1000
+Supplier Footprint
+SO-8
+JLCPCB Part Class
+Extended Part
+Datasheet
+https://item.szlcsc.com/datasheet/TLE5012BE1000/124353.html
+Supplier
+LCSC
+3D Model Title
+PG-DSO-8_L5.0-W4.0-H1.5-LS6.0-P1.27
+Out Type
+-
+Resolution
+15bit
+Minimum Field
+30mT
+Rotate Speed
+-
+Number of ABZ Pulses
+-
+Number of Conjugate Points of UVW
+-
+Supply Voltage
+3V~5.5V
+Supply Current
+14mA
+Operating Temperature
+-40℃~+150℃
+Features
+集成 CORDIC 算法；欠压锁定；角度预测功能；增量编码器输出；内置自检(BIST)；过压锁定
+Description
+采用巨磁电阻的角度传感器
+
+*
+]
+[
+DESIGNATOR
+FPC1
+FOOTPRINT
+FPC-SMD_LAIL-FPC-CDX01-5P0.5-GW
+PARTTYPE
+LAIL-FPC-CDX01-5P0.5-GW
+DESCRIPTION
+锁定特性:翻盖式;触点类型:双侧触点/上下接;触点数量:5P;间距:0.5mm;安装方式:卧贴;工作温度:-45℃~+85℃;
+Component Kind
+Standard
+Unique ID
+gge209
+Add into BOM
+yes
+Convert to PCB
+yes
+Name
+LAIL-FPC-CDX01-5P0.5-GW
+Designator
+FPC1
+Symbol
+LAIL-FPC-CDX01-5P0.5-GW
+Device
+LAIL-FPC-CDX01-5P0.5-GW
+Reuse Block
+
+Group ID
+
+Channel ID
+
+LCSC Part Name
+翻盖式 双侧触点/上下接 P数:5P 间距:0.5mm
+Supplier Part
+C55172962
+Manufacturer
+LAILAN(莱联)
+Manufacturer Part
+LAIL-FPC-CDX01-5P0.5-GW
+Supplier Footprint
+SMD,P=0.5mm,卧贴
+JLCPCB Part Class
+Extended Part
+Datasheet
+https://item.szlcsc.com/datasheet/LAIL-FPC-CDX01-5P0.5-GW/58956707.html
+Supplier
+LCSC
+Locking Feature
+翻盖式
+Contact Type
+双侧触点/上下接
+Number of Contacts
+5P
+Pitch
+0.5mm
+Mounting Type
+卧贴
+FFC, FCB Thickness
+0.3mm
+Height Above Board
+2mm
+Contact Material
+磷青铜
+Contact Plating
+锡
+Operating Temperature
+-45℃~+85℃
+Rated Voltage (Max)
+50V
+Current Rating (Max)
+500mA
+Storage Temperature
+-25℃~+55℃
+Description
+锁定特性:翻盖式;触点类型:双侧触点/上下接;触点数量:5P;间距:0.5mm;安装方式:卧贴;工作温度:-45℃~+85℃;
+
+*
+]
+[
+DESIGNATOR
+C1
+FOOTPRINT
+C0603
+PARTTYPE
+CAP_0603
+DESCRIPTION
+
+Component Kind
+Standard
+Unique ID
+gge210
+Add into BOM
+yes
+Convert to PCB
+yes
+Designator
+C1
+Symbol
+Capacitance
+Device
+CAP_0603
+Supplier Footprint
+0603
+3D Model Title
+C0603_L1.6-W0.8-H0.8
+Value
+100nF
+Name
+100nF
+Description
+
+Sim Model
+
+Sim Model Title
+
+Sim Model Path
+
+NGSpice Model
+
+NGSpice Model Title
+
+NGspice Model Path
+
+Reuse Block
+
+Group ID
+
+Channel ID
+
+
+*
+]
+(
+SPI3_SCK 
+U1-2 TLE5012BE1000-SCK Passive 
+FPC1-4 LAIL-FPC-CDX01-5P0.5-GW-4 Passive 
+)
+(
+SPI3_CS_ENC2 
+U1-3 TLE5012BE1000-CSQ Passive 
+FPC1-2 LAIL-FPC-CDX01-5P0.5-GW-2 Passive 
+)
+(
+SPI3_DATA 
+U1-4 TLE5012BE1000-DATA Passive 
+FPC1-3 LAIL-FPC-CDX01-5P0.5-GW-3 Passive 
+)
+(
+3V3 
+U1-6 TLE5012BE1000-VDD Passive 
+FPC1-1 LAIL-FPC-CDX01-5P0.5-GW-1 Passive 
+C1-2 CAP_0603-2 Input   
+)
+(
+GND 
+U1-7 TLE5012BE1000-GND Passive 
+FPC1-5 LAIL-FPC-CDX01-5P0.5-GW-5 Passive 
+FPC1-6 LAIL-FPC-CDX01-5P0.5-GW-6 Passive 
+FPC1-7 LAIL-FPC-CDX01-5P0.5-GW-7 Passive 
+C1-1 CAP_0603-1 Input   
+)

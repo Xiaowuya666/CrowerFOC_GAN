@@ -1,0 +1,40 @@
+# Local Python environments and caches
+**/.venv/
+**/venv/
+**/__pycache__/
+*.py[cod]
+*.before_*
+HostUI/_check.py
+
+# Local build products and generated IDE state
+Software/MotorTest_cmake/build/
+Software/MotorTest_cmake/.settings/
+Software/MotorTest_cmake/.project
+Software/MotorTest_cmake/.cproject
+Software/MotorTest_cmake/*.elf
+Software/MotorTest_cmake/*.hex
+Software/MotorTest_cmake/*.bin
+.tools/
+
+# Local test captures / generated reports (curated reports live in docs/)
+tools/*_results/
+tools/test_visualizations/
+tools/gui_*.png
+tools/*_result*.png
+tools/*_result*.json
+tools/*_result*.csv
+tools/*_result*.svg
+tools/full_test_calibration_result.png
+tools/*.json
+tools/*.csv
+tools/gui_*.png
+
+# One-shot editing helpers and compiled standalone benchmarks
+tools/implement_*.py
+tools/brightest_stream
+tools/brightest_v4l2
+tools/rtjitter
+
+# Recovery copy, not project source
+_rollback_backup_*/
+

@@ -22,6 +22,9 @@ int test_entry(void) {
   c.torque_units_nm=1;CHECK(!cff_config_valid(&c),4);c=test_defaults;
   c.pos_limits_enable=1;c.circular_enable=1;CHECK(!cff_config_valid(&c),5);c=test_defaults;
   c.motor_temp_enable=1;c.motor_ntc_beta=0;CHECK(!cff_config_valid(&c),6);c=test_defaults;
+  c.motor_ntc_beta=3450;c.motor_ntc_r25=10000;
+  CHECK(cff_config_migrate_motor_ptc(&c)&&fabsf(c.motor_ntc_beta-9.9130435f)<.001f&&c.motor_ntc_r25==620,63);
+  CHECK(cff_config_valid(&c),64);
   CHECK(!cff_param_write(&c,cff_param_find(0x0800),1.5f),7);
   CHECK(cff_param_write(&c,cff_param_find(0x0402),20)&&cff_config_valid(&c),8);
   c=test_defaults;
@@ -74,8 +77,9 @@ int test_entry(void) {
   CHECK(m.traj.done&&fabsf(m.pos-1)<.00001f,36);
   c.circular_enable=1;c.circular_range=6.2831853f;
   CHECK(fabsf(cff_position_error(.1f,6.2f,&c)-.1831853f)<.0001f,37);
-  CHECK(fabsf(cff_ntc_temperature(2048,10000,3450)-25)<.1f,40);
-  CHECK(!isfinite(cff_ntc_temperature(0,10000,3450))&&!isfinite(cff_ntc_temperature(4095,10000,3450)),41);
+  CHECK(fabsf(cff_ptc_temperature((uint16_t)(620.0f*4095.0f/10620.0f),620,9.9130435f)-25)<.02f,40);
+  CHECK(fabsf(cff_ptc_temperature((uint16_t)(848.0f*4095.0f/10848.0f),620,9.9130435f)-48)<.1f,65);
+  CHECK(!isfinite(cff_ptc_temperature(0,620,9.9130435f))&&!isfinite(cff_ptc_temperature(4095,620,9.9130435f)),41);
   CHECK(cff_temperature_derating(80,70,90)==.5f&&cff_temperature_derating(95,70,90)==0,42);
   uint8_t p[8]={0x80,0,0x80,0,0,0,0x08,0};cff_mit_command_t command;
   CHECK(cff_mit_decode(p,8,&command)&&fabsf(command.iq_ff_A)<.02f,50);

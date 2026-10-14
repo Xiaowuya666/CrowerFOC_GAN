@@ -90,6 +90,13 @@ static inline float cff_motion_step(cff_motion_t *m,const cff_config_t *c,float 
 static inline float cff_temperature_derating(float temperature,float lower,float upper) {
   return cff_clamp((upper-temperature)/(upper-lower),0,1);
 }
+static inline float cff_ptc_temperature(uint16_t adc,float r25,float slope_ohm_per_c) {
+  if(adc<8u||adc>4087u) return NAN;
+  float resistance=10000.0f*(float)adc/(4095.0f-(float)adc);
+  if(!isfinite(resistance)||!isfinite(r25)||!isfinite(slope_ohm_per_c)||
+     r25<=0.0f||slope_ohm_per_c<=0.0f) return NAN;
+  return 25.0f+(resistance-r25)/slope_ohm_per_c;
+}
 static inline float cff_ntc_temperature(uint16_t adc,float r25,float beta) {
   if(adc<8u||adc>4087u) return NAN;
   float resistance=10000.0f*(float)adc/(4095.0f-(float)adc);

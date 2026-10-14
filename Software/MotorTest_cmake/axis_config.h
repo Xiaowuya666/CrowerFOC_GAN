@@ -48,6 +48,18 @@ static inline int cff_config_migrate_speed_units(cff_config_t *c) {
   return changed;
 }
 
+/* TEMP2 was previously described as an unverified NTC. Keep the record layout
+   unchanged and translate its former B-value into the measured two-point PTC
+   line on load. The R25 and slope fields retain their binary positions. */
+static inline int cff_config_migrate_motor_ptc(cff_config_t *c) {
+  if (c->motor_ntc_beta > 100.0f) {
+    c->motor_ntc_beta = 9.9130435f; /* ohm / degree C */
+    c->motor_ntc_r25 = 620.0f;
+    return 1;
+  }
+  return 0;
+}
+
 static inline int cff_input_compatible(unsigned control, unsigned input) {
   return input == 1u || (input == 2u && control == 1u) ||
     ((input == 3u || input == 4u) && control == 2u) || (input == 5u && control == 0u);
@@ -72,7 +84,8 @@ static inline int cff_config_valid(const cff_config_t *c) {
     c->bus_uv < c->bus_uv_recover && c->bus_uv_recover < c->bus_ov &&
     F(fet_temp_lower,30,100) && F(fet_temp_upper,40,120) && c->fet_temp_lower < c->fet_temp_upper &&
     F(motor_temp_lower,30,150) && F(motor_temp_upper,40,180) && c->motor_temp_lower < c->motor_temp_upper &&
-    F(motor_ntc_beta,1000,6000) && F(motor_ntc_r25,100,1000000) &&
+    ((F(motor_ntc_beta,0.1f,100.0f)) || F(motor_ntc_beta,1000,6000)) &&
+    F(motor_ntc_r25,100,1000000) &&
     F(regen_current,0,100) && F(input_power,0,10000) && c->can_node >= 1u && c->can_node <= 7u &&
     (c->can_bitrate_kbps == 125u || c->can_bitrate_kbps == 250u ||
      c->can_bitrate_kbps == 500u || c->can_bitrate_kbps == 1000u) &&

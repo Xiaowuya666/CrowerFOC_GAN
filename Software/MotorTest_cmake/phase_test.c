@@ -121,9 +121,10 @@ static const cff_config_t s_defaults = {
   .pos_min=-PH_TWO_PI, .pos_max=PH_TWO_PI, .pos_zero=0, .circular_range=PH_TWO_PI,
   .bus_uv=14, .bus_uv_recover=16, .bus_ov=32,
   .fet_temp_lower=70, .fet_temp_upper=90, .motor_temp_lower=80, .motor_temp_upper=100,
-  .motor_ntc_beta=3450, .motor_ntc_r25=10000, .regen_current=0, .input_power=0,
-  /* Keep the verified board NTC active. TEMP2's motor sensor curve is unknown,
-     so leave its temperature conversion/trip disabled until configured. */
+  .motor_ntc_beta=9.9130435f, .motor_ntc_r25=620, .regen_current=0, .input_power=0,
+  /* TEMP2 uses the user's two-point PTC line (25 C/620 ohm, 48 C/848 ohm).
+     Keep the independently selectable trip disabled until the expanded-range
+     motor-sensor curve and safe winding limits are confirmed. */
   .fet_temp_enable=1u, .motor_temp_enable=0u,
   .can_node=1, .can_bitrate_kbps=1000, .can_heartbeat_ms=100, .can_encoder_ms=1,
   .torque_vel_limit=1,
@@ -993,7 +994,7 @@ static void ph_slow_sensors(void) {
     }
     s_fet_temp=fet;
     if(s_cfg.motor_temp_enable) {
-      raw=ph_adc2_read(LL_ADC_CHANNEL_2);motor=cff_ntc_temperature(raw,s_cfg.motor_ntc_r25,s_cfg.motor_ntc_beta);
+      raw=ph_adc2_read(LL_ADC_CHANNEL_2);motor=cff_ptc_temperature(raw,s_cfg.motor_ntc_r25,s_cfg.motor_ntc_beta);
       if(!isfinite(motor)||motor<-30||motor>200) {scale=0;ph_safe_stop(CFF_FAULT_MOTOR_TEMP);}
       else {scale=fminf(scale,cff_temperature_derating(motor,s_cfg.motor_temp_lower,s_cfg.motor_temp_upper));
         if(motor>=s_cfg.motor_temp_upper) ph_safe_stop(CFF_FAULT_MOTOR_TEMP);}
@@ -1805,6 +1806,7 @@ void phase_test_init(void)
   memset(s_cogging_map_ma,0,sizeof(s_cogging_map_ma));
   /* Upgrade known old direct-drive defaults/full-scale speed pairs only. */
   if(s_config_loaded) (void)cff_config_migrate_speed_units(&s_cfg);
+  if(s_config_loaded) (void)cff_config_migrate_motor_ptc(&s_cfg);
   /* Upgrade an existing calibrated 1 kHz PI profile to the measured 1 kHz
      closed-loop target. Preserve all other user-selected bandwidth settings. */
   if(s_config_loaded && s_calibrated &&

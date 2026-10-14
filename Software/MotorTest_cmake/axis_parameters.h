@@ -25,7 +25,7 @@ static const cff_param_desc_t cff_params[]={
   FP(0x0420,bus_uv,5,30), FP(0x0421,bus_uv_recover,6,32), FP(0x0422,bus_ov,17,34),
   FP(0x0430,fet_temp_lower,30,100), FP(0x0431,fet_temp_upper,40,120),
   BP(0x0432,motor_temp_enable), FP(0x0433,motor_temp_lower,30,150), FP(0x0434,motor_temp_upper,40,180),
-  FP(0x0435,motor_ntc_beta,1000,6000), FP(0x0436,motor_ntc_r25,100,1000000),
+  FP(0x0435,motor_ntc_beta,0.1f,100), FP(0x0436,motor_ntc_r25,100,1000000),
   BP(0x0437,fet_temp_enable),
   FP(0x0440,regen_current,0,100), FP(0x0441,input_power,0,10000),
   {0x0500,offsetof(cff_config_t,control_mode),1,0,2}, {0x0501,offsetof(cff_config_t,input_mode),1,1,5},

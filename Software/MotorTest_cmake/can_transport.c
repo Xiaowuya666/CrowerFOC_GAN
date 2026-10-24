@@ -48,7 +48,9 @@ void cff_can_task(cff_can_receive_t receive,cff_can_fault_t fault) {
     hal_fdcan_rx_header_t rx={0};uint8_t data[64]={0};
     if(HAL_FDCAN_GetReceivedMessage(bus,HAL_FDCAN_RX_FIFO_0,&rx,data)!=HAL_OK) {g_can_dropped++;break;}
     if(rx.b.identifier_type==HAL_FDCAN_ID_STANDARD&&rx.b.frame_format==HAL_FDCAN_HEADER_FRAME_FORMAT_CAN&&rx.b.data_length<=8) {
-      g_can_rx++; receive((uint16_t)(rx.b.identifier>>18),data,(uint8_t)rx.b.data_length,(uint8_t)rx.b.frame_type);
+      /* HAL_FDCAN_GetReceivedMessage() already shifts standard IDs back from
+         message-RAM bits [28:18] to the logical 11-bit value. */
+      g_can_rx++; receive((uint16_t)rx.b.identifier,data,(uint8_t)rx.b.data_length,(uint8_t)rx.b.frame_type);
     }
   }
 }

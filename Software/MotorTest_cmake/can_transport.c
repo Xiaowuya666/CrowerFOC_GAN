@@ -21,7 +21,10 @@ int cff_can_init(unsigned bitrate) {
 int cff_can_send(uint16_t id,const uint8_t *data,uint8_t length) {
   if(!bus||length>8||!HAL_FDCAN_GetTxFifoFreeLevel(bus)) { g_can_dropped++;return 0; }
   hal_fdcan_tx_header_t tx={0};
-  tx.b.identifier=(uint32_t)id<<18; tx.b.identifier_type=HAL_FDCAN_ID_STANDARD;
+  /* This HAL accepts a logical 11-bit ID and shifts it into bits [28:18]
+     internally when writing the message RAM. Pre-shifting here makes the
+     HAL shift it a second time and corrupts the transmitted identifier. */
+  tx.b.identifier=(uint32_t)id; tx.b.identifier_type=HAL_FDCAN_ID_STANDARD;
   tx.b.frame_type=HAL_FDCAN_FRAME_DATA; tx.b.data_length=(hal_fdcan_data_length_code_t)length;
   tx.b.frame_format=HAL_FDCAN_HEADER_FRAME_FORMAT_CAN;
   if(HAL_FDCAN_ReqTransmitMsgFromFIFOQ(bus,&tx,data)!=HAL_OK) {g_can_dropped++;return 0;}

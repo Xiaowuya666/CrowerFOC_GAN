@@ -6,7 +6,7 @@
 #include "axis_config.h"
 #include "cogging_compensation.h"
 #define CFF_CONFIG_MAGIC 0x43464632u
-#define CFF_CONFIG_VERSION 4u
+#define CFF_CONFIG_VERSION 5u
 #define CFF_CONFIG_COMMIT 0xC0FF17EDu
 typedef struct {
   uint32_t magic, version, sequence, size;
@@ -18,6 +18,19 @@ typedef struct {
   uint32_t encoder2_enabled;
   int32_t encoder2_dir;
   float encoder2_offset;
+  uint32_t crc;
+} cff_config_record_v4_t;
+typedef struct {
+  uint32_t magic, version, sequence, size;
+  cff_config_t config;
+  int16_t cogging_map_ma[CFF_COGGING_BINS];
+  uint32_t cogging_valid;
+  float calibration_quality;
+  uint32_t calibrated;
+  uint32_t encoder2_enabled;
+  int32_t encoder2_dir;
+  float encoder2_offset;
+  float encoder2_ratio, encoder2_quality;
   uint32_t crc;
 } cff_config_record_t;
 /* Version 3 is the deployed record before output-encoder settings. */
@@ -50,8 +63,19 @@ static inline int cff_record_valid(const cff_config_record_t *r, uint32_t commit
     r->crc==cff_crc32(r,offsetof(cff_config_record_t,crc)) && cff_config_valid(&r->config) &&
     r->calibrated<=1u && r->cogging_valid<=1u && (!r->cogging_valid||r->calibrated) && isfinite(r->calibration_quality) &&
     r->encoder2_enabled<=1u && (r->encoder2_dir==1||r->encoder2_dir==-1) && isfinite(r->encoder2_offset) &&
+    isfinite(r->encoder2_ratio) && r->encoder2_ratio>=0 && r->encoder2_ratio<=10000 &&
+    isfinite(r->encoder2_quality) && r->encoder2_quality>=0 && r->encoder2_quality<=1.001f &&
+    (!r->encoder2_ratio || r->encoder2_quality>=.995f) &&
     (!r->calibrated || (r->config.pole_pairs>=1 && r->config.phase_resistance>0 &&
       r->config.phase_inductance>0 && r->calibration_quality>=0.95f && r->calibration_quality<=1.001f));
+}
+static inline int cff_record_v4_valid(const cff_config_record_v4_t *r,uint32_t commit) {
+  if(r->version!=4u || r->crc!=cff_crc32(r,offsetof(cff_config_record_v4_t,crc)))return 0;
+  cff_config_record_t current={0};
+  memcpy(&current,r,offsetof(cff_config_record_v4_t,crc));
+  current.version=CFF_CONFIG_VERSION;
+  current.crc=cff_crc32(&current,offsetof(cff_config_record_t,crc));
+  return cff_record_valid(&current,commit);
 }
 static inline int cff_record_v2_valid(const cff_config_record_v2_t *r,uint32_t commit) {
   return commit==CFF_CONFIG_COMMIT && r->magic==CFF_CONFIG_MAGIC && r->version==2u &&

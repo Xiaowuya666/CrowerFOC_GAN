@@ -1,8 +1,8 @@
 # CrowerFOC 在线测试与调试手册
 
-本文供开发和实机测试使用，记录可复现命令、观测项、边界和当前连接限制。路径以 `C:\Users\Crowe\Desktop\MyMotor_ws` 为工程根目录。CAN 运控协议详见 [MIT CAN 协议说明](CrowerFOC_MIT_CAN协议说明.md)。
+本文供开发和实机测试使用，记录可复现命令、观测项、边界和当前连接限制。下文的 `<repo>` 代表仓库根目录。CAN 运控协议详见 [MIT CAN 协议说明](CrowerFOC_MIT_CAN协议说明.md)。
 
-**当前验收状态（2026-10-14）：** 25kHz 电流环、USB 遥测和独立 d 轴扫频可用；最近扫频的 1.25–1.8kHz 点被判无效，附近可见增益峰，−3dB 带宽未能确定。不得把控制器的 1kHz 设计目标或单点通过旗标当作已经验证的带宽/稳定裕度。阶跃带宽分析已从固件和上位机移除。TEMP2 的外接 PTC 已按独立温度计数据 25℃/620Ω、48℃/848Ω 进行两点线性拟合；保护仍默认关闭，25–48℃之外的曲线与高温安全阈值尚未实测确认。CAN 无物理适配器时只完成离线验证；第二编码器尚待安装验收。持续电流、40A能力和热可靠性均未认证。
+**当前验收状态（2026-10-27）：** 25kHz 电流环、USB 遥测和独立 d 轴扫频可用；最近扫频的 1.25–1.8kHz 点被判无效，附近可见增益峰，−3dB 带宽未能确定。不得把控制器的 1kHz 设计目标或单点通过旗标当作已经验证的带宽/稳定裕度。阶跃带宽分析已从固件和上位机移除。TEMP2 的外接 PTC 已按独立温度计数据 25℃/620Ω、48℃/848Ω 进行两点线性拟合；保护仍默认关闭，25–48℃之外的曲线与高温安全阈值尚未实测确认。CAN 已完成 PCAN-USB 1Mbps 收发及 1A 限流下 ±0.2A 电流命令验证；命令断帧看门狗、bus-off 恢复、第三方主控互操作和高电流能力仍待验收。第二编码器当前未连接。持续电流、40A能力和热可靠性均未认证。
 
 当前固件已移除按实测转速触发的跳闸；速度指令限制仍约束速度模式命令，力矩模式下电机可加速至机械负载与反电势限制。`0x0402`仅为旧固件兼容参数，当前固件不执行该保护；电流、母线电压、编码器、驱动故障和通信看门狗保护保留。此项变化要求运行时确保机械结构和电机本体不超过各自额定转速。
 
@@ -13,7 +13,10 @@
 | 设备 | 识别信息 | 用途 |
 |---|---|---|
 | 电机板 USB CDC | `VID_0483&PID_5710`，当前 COM7 | 上位机协议和遥测 |
-| Horco CMSIS-DAP v2 | `VID_FAED&PID_4870`，设备状态 Started，MI_00 绑定 WinUSB；组合设备另有 COM9 | SWD 调试/烧录；COM9 不是 CrowerFOC CDC |
+| Horco CMSIS-DAP v2 | `VID_FAED&PID_4870`，设备状态 Started，MI_00 绑定 WinUSB；组合设备另有无线串口 COM9 | SWD 调试/烧录；COM9 桥接目标 UART4 时使用 921600 bit/s |
+| 板载 UART4 | Horco COM9 无线串口或外接 USB-UART 转接器 | 同一上位机协议；固件 921600 bit/s |
+
+主板网表还确认板载 UART4 调试接口为 `CN2`：CN2-1=`UART4_RX`/PB8，CN2-2=`UART4_TX`/PB9，CN2-3=`GND`。UART4 是 3.3V TTL、8N1、921600 bit/s；上位机端选择对应 USB-UART 转接器 COM 口及 921600。连接时转接器 TX→CN2-1、RX→CN2-2、GND→CN2-3。不得向该接口输入 RS-232 或 5V TTL 电平。USB CDC 与 UART4 共用同一 CrowerFOC 帧协议和 HostUI 功能；一台主机只连接一条链路作为控制端。
 
 Windows 看得到探针说明 USB 枚举和驱动已建立，不能单独证明调试传输已打开。复核命令：
 
@@ -22,79 +25,63 @@ pnputil /enum-devices /connected |
   Select-String -Pattern 'Horco CMSIS-DAP v2|VID_FAED|VID_0483|COM7|COM9' -Context 2,4
 ```
 
-工程隔离的 pyOCD 环境：
+工程隔离的 pyOCD 环境（首次使用需安装 pyOCD 和器件包）：
 
 ```powershell
-cd C:\Users\Crowe\Desktop\MyMotor_ws
+cd <repo>
+py -3 -m venv .tools\pyocd-venv
+.\.tools\pyocd-venv\Scripts\python.exe -m pip install pyocd
+.\.tools\pyocd-venv\Scripts\python.exe -m pyocd pack update
+.\.tools\pyocd-venv\Scripts\python.exe -m pyocd pack install stm32c562cet6
 .\.tools\pyocd-venv\Scripts\python.exe -m pyocd --version
 .\.tools\pyocd-venv\Scripts\python.exe -m pyocd list -p
 ```
 
-**重要：设备管理器可见，不等于 Codex 受限进程能访问 USB 探针。** 本机 Horco CMSIS-DAP v2 使用 WinUSB（VID/PID `FAED:4870`）。在沙箱里运行 `pyocd list` / libusb 扫描可能得到 `No available debug probes are connected`，这是 USB 设备访问隔离导致的假阴性；它本身不能证明探针掉线，也不是让用户反复重插、换驱动或用 Zadig 重绑接口的理由。COM7 是电机板 CDC，和探针是不同 USB 设备。
+**探针可见性检查：** 设备管理器可见只说明 Windows 枚举到了设备，仍需由 pyOCD 成功打开 CMSIS-DAP 接口。请从 CMD 运行 `flash.bat list`；如果它报告未发现探针，再检查线缆、USB 口、Horco 驱动/接口状态和是否有调试软件占用。不要仅凭一次 pyOCD 枚举失败就更换驱动或用 Zadig 重绑接口。COM7 是电机板 CDC，与调试探针是不同 USB 设备。
 
-**Codex 中烧录前检查顺序：** 先确认设备管理器仍列出 `Horco CMSIS-DAP v2`；如果仅沙箱内 pyOCD 找不到探针，直接把 `pyocd list -p` 以允许直接访问 USB 的方式运行（本环境即对 `exec_command` 使用 `require_escalated`），不要先重复普通沙箱扫描。出现探针 UID `846703532218` 后，再以同样的 USB 访问方式运行本节 `flash_fast.ps1`。只有直接访问 USB 的枚举仍失败，才继续查物理连接、驱动或占用。烧录脚本现已在尝试多个 SWD 频率前做探针预检，避免对“根本不可见”的设备逐频率空试。
+最近一次 UART4 联调记录（2026-10-14）：COM9 可打开但无数据。pyOCD attach 读取 UART4_CR1=`0x2C`，发现 UE(bit 0) 未置位；临时置 UE 后 COM9 即收到遥测，`GET 0x0100` 成功返回极对数 21。原因是 UART HAL 配置后没有显式使能外设。已在 `phase_test_uart_init()` 补上 UE 使能；需要烧录该修复后确认复位启动仍能持续收发。探针识别和烧录均通过 `flash.bat` 操作；如果脚本识别不到探针，再检查 Windows 设备枚举、USB 连接、接口驱动和占用情况。
 
-最近一次复现记录（2026-10-14）：普通受限进程 `pyocd list` 看不到探针；允许直接 USB 访问后识别 Horco（UID `846703532218`），`flash_fast.ps1` 以 1MHz 烧录成功（9.9s），硬件复位成功，电机板 USB CDC 重新枚举为 COM7。不要为了扫描探针更换 WinUSB 驱动或用 Zadig 重绑接口。
-
-串口在 GUI 和脚本间只能由一个进程占用。COM7 的 `PermissionError(13, Access denied)` 表示当前进程无法打开端口；关闭 GUI、串口助手和遗留测试进程后再检查。CDC 波特率由当前 HostUI/协议客户端打开为 115200；旧诊断脚本可能使用不同速率，应以脚本自身的 `serial.Serial(...)` 为准。端口号应通过 VID/PID 查找，不应假定永远是 COM7。
+串口在 GUI 和脚本间只能由一个进程占用。USB CDC 在 HostUI 中使用 115200（CDC 实际吞吐不受该设置限制）；UART4（包括 Horco COM9 无线串口）使用 921600 bit/s，HostUI 选择对应端口后会默认选择该速率，也可在顶部波特率框修改。端口号应通过设备描述/VID/PID 识别，不应假定永远是 COM7。
 
 ## 2. 构建、主机测试与固件烧录
 
-先在工程根目录运行主机逻辑回归，再构建 MCU 工程：
+从仓库根目录运行主机逻辑回归，再构建 MCU 工程。首次构建需先运行 `cmake --preset debug_GCC_STM32C562CET6`：
 
 ```powershell
-cd C:\Users\Crowe\Desktop\MyMotor_ws\HostUI
+cd <repo>\HostUI
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 
 cd ..\Software\MotorTest_cmake
 cmake --build --preset debug_GCC_STM32C562CET6
 ```
 
-项目推荐烧录脚本从 `under-reset` 模式开始，首选 1MHz SWD，失败后依次尝试 500/250/100kHz，之后尝试硬件复位并等 USB CDC 重枚举：
+从 CMD 使用 `flash.bat` 烧录。无参数时会自动构建、识别 Horco 探针、尝试烧录并复位；也可先运行 `flash.bat list` 只检查探针：
 
-```powershell
-cd C:\Users\Crowe\Desktop\MyMotor_ws\Software\MotorTest_cmake
-powershell -NoProfile -ExecutionPolicy Bypass -File .\flash_fast.ps1
+```bat
+cd /d <repo>\Software\MotorTest_cmake
+flash.bat list
+flash.bat
 ```
 
-成功判定必须有 `[flash] OK @ ...`，且脚本没有报告所有频率失败。最后的 USB 枚举只证明设备出现，不能替代协议读取。烧录后先检查状态/故障和参数，再决定是否转动。`flash.bat` 使用旧 `.exe` 启动器，不是当前推荐入口；采用 `python -m pyocd` 的 `flash_fast.ps1`。
+支持 `flash.bat uid 846703532218` 指定探针、`flash.bat skip-build` 使用已有 ELF、`flash.bat firmware "C:\path\MotorTest.elf"` 指定固件，以及 `flash.bat skip-verify` 跳过被动 UART 验证。成功判定应看到 `[flash] 烧录成功` 和 `[flash] 复位成功`；烧录后先检查状态/故障和参数，再决定是否转动。`flash_fast.ps1` 是批处理入口内部调用的实现文件，日常操作只需使用 `flash.bat`。
 
 本次工作记录（2026-10-13）：`MotorTest.elf` SHA256 为 `5801DC9426DA2D9D8C84930225FD3B45D70517C2E879F5F78FA7EB848F9A7648`；对应固件已烧录并在线验收。构建通过（最终检查 `ninja: no work to do`），HostUI 单元测试 34/34 通过。完整回归报告为 `tools/axis_feature_results/20261013_083739_features.json`。最终状态回读：IDLE、fault=0、目标电流/速度为零，运行电流上限 40A、速度指令上限 230rpm、过速跳闸 253rpm、母线过压 32V，校准有效且配置已保存。
 
 固件修复：校准最后阶段原先在 25kHz 控制中断内执行平方根、反正切和多次三角函数；实测 ISR 峰值约 6269 周期，超过 40µs预算并锁存 deadline 故障。现在 ISR 只安全停止 PWM 并提交待处理标志，校准数学和结果写回移到主循环。重测完整 5A 校准、Flash 保存与重启回读通过；最终 ISR 峰值 24.19µs。
 
-## 3. 只读在线检查
+## 3. 在线检查与有限动作验证
 
-`tools/final_status_probe.py` 使用设备 USB 协议查询主要参数，并要求最终状态为 IDLE、无故障、零速度/力矩目标；它会发送心跳和 GET，不下发闭环/标定命令，并把结果写入 `tools/final_device_status.json`：
+在上位机检查空闲状态、故障、母线、ENC1 和标定状态。调试端口号会变化，设备管理器枚举不代表串口未被占用。
 
-```powershell
-cd C:\Users\Crowe\Desktop\MyMotor_ws
-.\.tools\host-venv\Scripts\python.exe .\tools\final_status_probe.py
+只读故障快照可在仓库根目录执行：
+
+```bat
+HostUI\.venv\Scripts\python.exe tools\read_fault_snapshot.py
 ```
 
-判定项：遥测持续更新，`state=1`、`fault=0`，目标速度和目标电流为零；母线电压与电源实测相符；标定标志、极对数和编码器状态有效。COM7 被占用时先关闭占用进程，不要重复启动多个 probe。
+第二编码器使用 PB6 独立片选；通过 `0x0840` 启用，`0x0843` 读健康状态，`0x0844` 读累计失败次数，`0x0845/0x0846` 读角度/速度。未连接时保持关闭；速度模式使用电机侧反馈，位置模式需要有效输出轴反馈。接入后先检查角度连续性和方向，再验证传动比与控制。
 
-设备输出轴编码器（第二 TLE5012B）在固件中和电机轴编码器共用 SSC 时钟/数据，独立片选 PB6；主板原电机编码器片选 PB4、SCK PB3、DATA PB5。硬件网络名 `SPI3_CS_ENC2` 对应 PB6。HostUI 通过 `0x0840` 启用，`0x0843` 读健康状态，`0x0844` 读累计失败次数，`0x0845/0x0846` 读输出轴角度/速度。先保持关闭，机械手动转动验证读数连续、方向正确，再启用并保存。启用后控制位置/速度和反馈以输出轴编码器为准，不使用固定减速比换算。
-
-## 4. 有限动作的硬件验收
-
-`tools/axis_feature_probe.py --snapshot` 仅收集初始参数；`--accept` 会实际转动，不要在机构受限、带负载或手/工具靠近轴时运行：
-
-```powershell
-cd C:\Users\Crowe\Desktop\MyMotor_ws
-.\.tools\host-venv\Scripts\python.exe .\tools\axis_feature_probe.py --snapshot
-.\.tools\host-venv\Scripts\python.exe .\tools\axis_feature_probe.py --accept
-```
-
-`--accept` 的当前实现包含：参数边界拒绝测试；5A 完整标定（校准硬限流 6A，原始跳闸 8A，电机空载缓慢转动）；保存/重启/回读；输出编码器状态判定；USB 心跳超时停机；最后恢复并保存 40A、230rpm、253rpm 配置。输出编码器启用、健康且实测减速比有限时，才运行 ±30rpm 和当前位置附近 +20° 位置测试；本次编码器板未安装，回归验证固件拒绝速度闭环，并跳过位置测试。随后以1A运行限流做±0.2A短时力矩点动，速度边界20rpm、相电流边界1.5A。该实现避免了未安装输出反馈时错误测试位置/速度控制。
-
-本次回归通过参数边界、校准、Flash 保存及重启、配置事务拒绝无效项、无输出编码器时安全拒绝速度闭环、±0.2A点动、USB心跳断线停机和最终配置恢复。点动遥测中的平均 Iq 分别为 +0.044A 与 −0.063A（目标±0.2A），速度峰值低于0.28rpm；这证明了低幅度正反向响应和安全停机，但电流跟踪精度需要单独继续检查。另一次独立短点动记录的跟踪更接近指令，见 `tools/current_loop_results/20261013_torque_smoke.json` 与配套 PNG/CSV，因此不能把单次均值当作精度验收。
-
-最终回归记录 `tools/axis_feature_results/20261013_083739_features.json` 显示 ISR 峰值 24.19µs；回归结束时 ADC 超时诊断累计计数为27，没有锁存 ADC 故障。随后只读状态脚本多次查询温度/ADC 参数后，计数读到77，状态仍为 IDLE、fault=0。该计数是诊断量，不作为零值断言；累计增长原因尚未隔离，若运行时继续增长或故障位出现，应单独查同步注入和常规 ADC 转换的超时来源。最终状态快照见 `tools/final_device_status.json`。
-
-顺序应为：先只读快照；确认空载和可自由转动；确认编码器校准有效、无故障、温度/母线条件可接受；再执行有限动作验收。`--accept` 当前会把软件运行限流临时设为1A，并在结束时恢复40A、230rpm、253rpm并保存。结束后仍需复查状态 IDLE、目标为零和保存序号。若中途异常，先断开控制输入并确认驱动已回到 IDLE，再保留失败 JSON；不要自动清故障后继续。
-
-`tools/drive_full_test.py` 是早期测试流程，速度单位仍使用旧协议 rad/s；不建议把它作为当前 rpm/° 接口验收入口。当前公开单位映射和扩展协议回归优先用 `axis_feature_probe.py` 及 HostUI 单元测试。
+有限动作检查应先确认机械可自由转动、母线和温度正常、ENC1 标定有效；用小电流短时点动并观察原始电流和故障。不同固件版本和硬件状态的历史结果不能替代本次验收。ENC1 低能量检查见第 7 节。
 
 ## 5. 电流采样和波形判读
 
@@ -111,6 +98,18 @@ cd C:\Users\Crowe\Desktop\MyMotor_ws
 
 GUI 的诊断模式会从 `Hardware\电调主板.net` 和 `Hardware\电调第二编码器.net` 读取器件清单，执行软件可观测项并为网表器件列出失效情景。它是检查表和逻辑模拟，不会物理注入器件短路、开路或过温，也不能代替示波器/万用表测量。
 
-板载 NTC 和电机侧温度传感器已接入；但电机侧传感器阻值/类型曲线尚未确认，启用保护前需核对室温读数、断开测阻、温度变化方向和阈值配置。过温保护可在上位机单独启闭，关闭会使对应通道不参与降额/跳闸。母线过压阈值目标为32V，仍须核对分压量程、实际电源和器件耐压。40A 是配置允许的峰值限流，不是已验证的板级连续额定值。MIT CAN 已实现离线编解码，真实总线仍需适配器和主控验收。第二编码器和位置闭环需等输出编码器安装后验收；空载小角度结果不能代表负载定位精度或长时间热可靠性。
+板载 NTC 和电机侧温度传感器已接入；但电机侧传感器阻值/类型曲线尚未确认，启用保护前需核对室温读数、断开测阻、温度变化方向和阈值配置。过温保护可在上位机单独启闭，关闭会使对应通道不参与降额/跳闸。母线过压阈值目标为32V，仍须核对分压量程、实际电源和器件耐压。40A 是配置允许的峰值限流，不是已验证的板级连续额定值。MIT CAN 已完成 PCAN-USB 1Mbps 收发和 1A 限流下 ±0.2A 指令的有限实机验证；超时断帧、bus-off 恢复和第三方主控互操作仍待验证，详见 `CrowerFOC_MIT_CAN协议说明.md`。第二编码器当前未连接，输出轴角度/速度/减速比及位置闭环尚未验收；空载小角度结果不能代表负载定位精度或长时间热可靠性。
 
-相关记录：`tools/DRIVE_FULL_TEST_REPORT.md`、`tools/CURRENT_SAMPLING_REPORT.md`、`tools/SPEED_LIMIT_DIAGNOSIS_20261009.md`、`tools/axis_feature_results/20261013_083739_features.json`、其点动曲线/CSV，以及 `tools/current_loop_results/20261013_torque_smoke.{json,csv,png}`。
+历史记录：`tools/DRIVE_FULL_TEST_REPORT.md`、`tools/CURRENT_SAMPLING_REPORT.md`、`tools/SPEED_LIMIT_DIAGNOSIS_20261009.md`。CAN 协议与实机验证边界见 `docs/CrowerFOC_MIT_CAN协议说明.md`。
+
+## 7. ENC1 换相映射的低能量实机检查
+
+这项检查用于判断“编码器1机械角→电角度→Park角度”的符号、极对数和零偏是否一致；不能证明负载能力或代替完整标定。未标定、编码器状态不健康、母线/温度异常或轴被机构约束时不要开始。
+
+1. 固定电机本体，拆除负载并清空轴周围空间；确保可立即断开母线。确认 ENC1 读数稳定、故障为 0，记录固件版本/ELF SHA、`pp`、`dir`、电角度零偏、映射质量及母线电压。不要为了本检查启动自动标定。
+2. 空闲时把运行限流临时设为 **1A**，速度指令限值设为 **5rpm**，应用后读回确认。该设置不是电流模式下的实际转速保护，仍需人工监控。选用直接 Iq 电流模式；先记录空闲 2 秒基线。
+3. 在闭环中依次给 `+0.2A` 250ms、`0A` 1秒、`−0.2A` 250ms、`0A` 1秒，最多重复 3 轮。若电流跟踪稳定且没有可见异常、但静摩擦使角度完全不动，可将幅值提高到 `±0.4A` 再做一次；全程不得超过 1A。
+4. 每个脉冲同时记录时间戳、Iq 目标/实测、Id、三相电流（注明原始或处理后）、ENC1 原始角度和展开机械角、换相电角度、实际 Park 电角度、两者误差、速度 rpm、Vq/PWM 占空比、饱和标志、故障/编码器健康位。每轮后立刻发 0A；若速度超过 5rpm、250ms 内机械角变化超过 5°、电流明显跳变、异响/振动或出现故障，立即停止并断开母线，不再重试。
+5. 检查关系 `elec = wrap(dir × pp × mech + offset)` 是否连续、方向一致；运动方向反转时，电流符号应随之反转，Park 角误差不应随角度持续漂移。完成后回到 IDLE，确认目标电流为 0，再恢复原运行限制并读回。保留 CAN Rx/Tx/drop 计数（若走 CAN）、USB/UART 日志和原始 CSV；没有这些同步字段的截图不能单独作为换相通过依据。
+
+该步骤只提供低能量排查模板，当前没有新的实机采样记录，不能据此判定换相问题已经关闭。若 1A 限流下无法克服静摩擦，应先改善无负载/摩擦条件，不要直接提高电流。

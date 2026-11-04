@@ -25,30 +25,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   stm32c5xx_drivers/hal/stm32c5xx_hal_flash.c
 )
 
-# The 40 kHz FOC ISR needs optimisation (the project default is -O0).
+# The 25 kHz FOC ISR needs optimisation (the project default is -O0).
 set_source_files_properties(phase_test.c PROPERTIES COMPILE_OPTIONS "-O2")
 set_source_files_properties(config_store.c can_transport.c PROPERTIES COMPILE_OPTIONS "-O2")
-
-target_include_directories(${CMAKE_PROJECT_NAME} PUBLIC
-  # Add additional include directories here
-)
-
-target_compile_definitions(${CMAKE_PROJECT_NAME} PUBLIC
-  # Add additional defined symbols here
-)
-
-target_compile_options(${CMAKE_PROJECT_NAME} PUBLIC
-  # Add additional compiler flags here
-)
-
-target_link_options(${CMAKE_PROJECT_NAME} PUBLIC
-  # Add additional linker flags here
-)
-
-target_link_directories(${CMAKE_PROJECT_NAME} PUBLIC
-  # Add additional linker search directories here
-)
-
-target_link_libraries(${CMAKE_PROJECT_NAME} PUBLIC
-  # Add additional linker libraries here
-)

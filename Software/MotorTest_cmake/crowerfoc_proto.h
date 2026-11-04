@@ -35,6 +35,7 @@
 #define CFF_MSG_CURRENT_TRACE 0x07u /* GET 0x0700..073F: u16 index, 28-byte record */
 #define CFF_MSG_CONTROL_DIAG 0x08u /* u16 seq + 12*f32: targets/voltages/angles/age/KCL */
 #define CFF_MSG_AXIS_DIAG 0x0Au /* u16 seq, 15*f32 incl. measured motor/output ratio */
+#define CFF_MSG_ENCODERS 0x0Bu /* u16 seq, 8*f32 radians/rad/s/ratio, u8 health, u8 ENC2 calibration */
 
 /* host -> device */
 #define CFF_MSG_SET        0x81u   /* payload: u16 id, <value>           */
@@ -46,6 +47,8 @@
 #define CFF_MSG_REBOOT     0x87u
 #define CFF_MSG_HEARTBEAT  0x88u   /* empty; required at least every 750ms while driving */
 #define CFF_MSG_CONFIG_PATCH 0x89u /* op0 begin, op1 + (u16,f32)*N stage, op2 apply, op3 abort; idle only */
+#define CFF_MSG_MUSIC 0x8Au /* op0 u16 count; op1 u16 offset + (u16 Hz,u16 ms)*N; op2 f32 A; op3 stop */
+#define CFF_MSG_AUDIO 0x8Bu /* op0 f32 peak A; op1 u16 seq,u8 count,i8 PCM; op2 stop */
 
 /* ------------------------------------------------------------------ enums */
 enum {
@@ -54,7 +57,9 @@ enum {
   CFF_AXIS_CALIBRATION,
   CFF_AXIS_CLOSED_LOOP,
   CFF_AXIS_ERROR,
-  CFF_AXIS_MEASURE      /* align then measure R / L (dc step on d-axis) */
+  CFF_AXIS_MEASURE,     /* align then measure R / L (dc step on d-axis) */
+  CFF_AXIS_MUSIC,
+  CFF_AXIS_AUDIO
 };
 
 enum {               /* control mode  */

@@ -15,7 +15,11 @@ def _uint(value, lo, hi, bits):
     if not math.isfinite(value):
         raise ValueError("MIT命令数值必须有限")
     value = min(hi, max(lo, value))
-    return round((value - lo) * ((1 << bits) - 1) / (hi - lo))
+    # Match the MCU's (scaled + 0.5f) -> uint conversion. Python round() uses
+    # ties-to-even, which differs at half-count boundaries and can shift a
+    # 12-bit current command by one count (about 19.5 mA).
+    scaled = (value - lo) * ((1 << bits) - 1) / (hi - lo)
+    return math.floor(scaled + 0.5)
 
 
 def _float(value, lo, hi, bits):

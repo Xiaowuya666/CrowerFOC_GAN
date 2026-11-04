@@ -16,7 +16,7 @@
 #define PH_CAL_L_CYCLE_TICKS 816u /* 0.64 ms max pulse + 32 ms zero-current settling */
 #define PH_CAL_L_TICKS (PH_CAL_L_START + PH_CAL_L_REPEATS * PH_CAL_L_CYCLE_TICKS)
 #define PH_CAL_LOCK_TICKS 32000u
-#define PH_CAL_PP_TICKS 320000u
+#define PH_CAL_PP_TICKS 1050000u
 #define PH_CAL_STATIC_TICKS 32000u
 #define PH_CAL_STATIC_SETTLE 20000u
 #define PH_CAL_SWEEP_LEG_TICKS 80000u
@@ -32,6 +32,20 @@
 /* PI design target is raised 25% to compensate the measured loop shortfall;
  * the intended closed-loop -3 dB bandwidth is approximately 1 kHz. */
 #define PH_CAL_CURRENT_BW_TARGET_HZ 1250u
+
+/* Commissioning must not reuse a potentially stale operating PI profile.
+ * Before identification use conservative controller defaults (not motor R/L).
+ * Afterwards design a slower calibration loop from this run's measurements. */
+static inline void ph_cal_current_gains(unsigned stage, float resistance,
+                                        float inductance, float *kp, float *ki)
+{
+  *kp=0.05f; *ki=100.0f;
+  if (stage>=2u && isfinite(resistance) && isfinite(inductance) &&
+      resistance>0.0f && inductance>0.0f) {
+    const float bandwidth=6.28318530718f*250.0f;
+    *kp=inductance*bandwidth; *ki=resistance*bandwidth;
+  }
+}
 
 static inline unsigned ph_cal_bw_frequency(unsigned index)
 {

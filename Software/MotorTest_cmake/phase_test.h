@@ -1,17 +1,20 @@
 /**
   * @file    phase_test.h
-  * @brief   3-phase open-loop SPWM current test with USB streaming.
+  * @brief   FOC axis test and USB CDC/UART4 protocol streaming.
   */
 #ifndef PHASE_TEST_H
 #define PHASE_TEST_H
 
 #include <stdint.h>
 
-/* Bring up TIM1 3-phase PWM + ADC1 (IN4/5/6) + CDC streaming. */
+/* Bring up TIM1 3-phase PWM + ADC1 (IN4/5/6) + USB/UART4 protocol. */
 void phase_test_init(void);
 
 /* Drain the USB TX ring buffer (call from the main loop). */
 void phase_test_task(void);
+
+/* UART4 shares the USB CDC binary protocol and diagnostic stream. */
+void phase_test_uart_init(void);
 
 /* CDC-ACM activate/deactivate hooks (called from the USBX class callbacks). */
 void phase_test_on_activate(void *cdc_instance);

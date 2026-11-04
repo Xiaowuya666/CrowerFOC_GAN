@@ -2,7 +2,7 @@
   * @file    pwm_test.c
   * @brief   3-phase complementary PWM output test.
   *
-  *  TIM1 is driven in center-aligned mode at ~20 kHz with complementary
+  *  TIM1 is driven in center-aligned mode at 25 kHz with complementary
   *  outputs and deadtime on the three phases:
   *      CH1(PA8)/CH1N(PA7)  -> U2 PWMH/PWML   (phase A)
   *      CH2(PA9)/CH2N(PB0)  -> U3 PWMH/PWML   (phase B)
@@ -61,7 +61,7 @@ void pwm_test_init(void)
     s_sin[i] = (int32_t)(sinf(2.0f * PWM_CHUNK_PI * (float)i / (float)SINE_LEN) * 1000.0f);
   }
 
-  /* Center-aligned 20 kHz. */
+  /* Center-aligned 25 kHz. */
   (void)HAL_TIM_SetCounterMode(s_tim, HAL_TIM_COUNTER_CENTER_UP_DOWN);
   (void)HAL_TIM_SetPeriod(s_tim, PWM_PERIOD);
   (void)HAL_TIM_SetDeadtime(s_tim, PWM_DEADTIME, PWM_DEADTIME);

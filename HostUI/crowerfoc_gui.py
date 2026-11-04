@@ -26,6 +26,7 @@ import pyqtgraph as pg
 from crowerfoc_protocol import *
 from crowerfoc_transport import SerialWorker, find_port
 from host_tools import FaultDetailWidget, CanDebugWidget
+from motor_music import MotorMusicWidget
 
 
 # ----------------------------------------------------------------- 主窗口
@@ -136,6 +137,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_toolbar(self):
         self.cb_port = QtWidgets.QComboBox()
         self.cb_port.setMinimumWidth(120)
+        self.cb_baud = QtWidgets.QComboBox()
+        for baud in (115200, 460800, 921600):
+            self.cb_baud.addItem(str(baud), baud)
+        self.cb_baud.setCurrentIndex(self.cb_baud.findData(115200))
+        self.cb_port.activated.connect(self._port_baud_default)
         self.btn_refresh = QtWidgets.QPushButton("刷新")
         self.btn_conn = QtWidgets.QPushButton("连接")
         self.btn_conn.setMinimumWidth(90)
@@ -148,7 +154,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lb_mapping = QtWidgets.QLabel("换相 --")
         self.lb_thermal = QtWidgets.QLabel("温度 -- · 控制来源 --")
         lay = QtWidgets.QHBoxLayout()
-        for w in (QtWidgets.QLabel("端口"), self.cb_port, self.btn_refresh,
+        for w in (QtWidgets.QLabel("端口"), self.cb_port, QtWidgets.QLabel("波特率"), self.cb_baud, self.btn_refresh,
                   self.btn_conn, self.lb_conn, self.lb_rate, self.lb_vbus):
             lay.addWidget(w)
         lay.addStretch(1)
@@ -411,8 +417,10 @@ class MainWindow(QtWidgets.QMainWindow):
             ("设备", "device"), ("轴状态", "axis"),
             ("故障", "fault"), ("母线", "bus"),
             ("相电流 A / B / C", "phase"), ("Id / Iq", "dq"),
-            ("编码器1机械角 / 电角度", "angle"), ("编码器1转速", "speed"),
-            ("轴机械角位置", "position"), ("采样速率", "rate"),
+            ("ENC1 机械角 / 电角度", "angle"), ("ENC1 电机转速", "speed"),
+            ("ENC1 累计机械位置", "position"), ("ENC2 绝对机械角", "enc2_angle"),
+            ("ENC2 输出轴转速", "enc2_speed"), ("ENC2 累计机械位置", "enc2_position"),
+            ("ENC1 / ENC2 实测传动比", "ratio"), ("采样速率", "rate"),
         ]
         for index, (caption, key) in enumerate(readouts):
             row, col = divmod(index, 2)
@@ -433,7 +441,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lb_readout_note = QtWidgets.QLabel("连接设备后显示遥测；断开时控制项不可操作。")
         self.lb_readout_note.setWordWrap(True)
         self.lb_readout_note.setStyleSheet("padding:3px; background:#eef2f6; color:#48566a")
-        status_grid.addWidget(self.lb_readout_note, 5, 0, 1, 2)
+        status_grid.addWidget(self.lb_readout_note, (len(readouts)+1)//2, 0, 1, 2)
         status.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
 
         self.control_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -491,14 +499,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pw_dq, self.c_dq = self._mk(
             "d/q 轴电流", "电流 / A", ["id", "iq"], ["#ffcc55", "#cc66ff"])
         self.pw_mot, self.c_mot = self._mk(
-            "编码器1机械角 / 电角度", "角度 / °", ["ang", "ele"], ["#55ddff", "#ff88aa"])
-        self.pw_vel, self.c_vel = self._mk("机械速度", "rpm", ["vel"], ["#ffcc55"])
-        self.pw_pos, self.c_pos = self._mk("累计机械位置", "°", ["pos"], ["#99ccff"])
+            "ENC1 · 电机机械角 / 电角度", "角度 / °", ["enc1_ang", "enc1_elec"], ["#55ddff", "#ff88aa"])
+        self.pw_vel, self.c_vel = self._mk("ENC1 · 电机机械速度", "rpm", ["enc1_vel"], ["#ffcc55"])
+        self.pw_pos, self.c_pos = self._mk("ENC1 · 累计机械位置", "°", ["enc1_pos"], ["#99ccff"])
+        self.pw_mot2, self.c_mot2 = self._mk("ENC2 · 输出轴绝对机械角", "角度 / °", ["enc2_ang"], ["#66eebb"])
+        self.pw_vel2, self.c_vel2 = self._mk("ENC2 · 输出轴机械速度", "rpm", ["enc2_vel"], ["#ffcc55"])
+        self.pw_pos2, self.c_pos2 = self._mk("ENC2 · 累计机械位置", "°", ["enc2_pos"], ["#99ccff"])
         motion = QtWidgets.QWidget()
-        motion_layout = QtWidgets.QVBoxLayout(motion)
+        motion_layout = QtWidgets.QGridLayout(motion)
         motion_layout.setContentsMargins(0, 0, 0, 0)
-        for plot in (self.pw_mot, self.pw_vel, self.pw_pos):
-            motion_layout.addWidget(plot)
+        for row, plots in enumerate(((self.pw_mot,self.pw_mot2),(self.pw_vel,self.pw_vel2),(self.pw_pos,self.pw_pos2))):
+            for col, plot in enumerate(plots):motion_layout.addWidget(plot,row,col)
+            motion_layout.setRowStretch(row,1)
+        motion_layout.setColumnStretch(0,1);motion_layout.setColumnStretch(1,1)
         self.pw_duty, self.c_duty = self._mk(
             "PWM 占空比", "占空比 / %", ["da", "db", "dc"],
             ["#ff5555", "#55ff55", "#5599ff"])
@@ -521,7 +534,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pw_dq_live, self.c_dq_live = self._mk(
             "d/q 轴电流", "电流 / A", ["id", "iq"], ["#ffcc55", "#cc66ff"])
         self.pw_enc_live, self.c_enc_live = self._mk(
-            "编码器1机械角 / 电角度", "角度 / °", ["ang", "ele"], ["#55ddff", "#ff88aa"])
+            "ENC1机械角 / 电角度 · ENC2机械角", "角度 / °", ["ang", "ele", "enc2_ang"], ["#55ddff", "#ff88aa", "#66eebb"])
         for plot in (self.pw_cur_live, self.pw_dq_live, self.pw_enc_live):
             plot.setMinimumSize(90, 70)
         self.live_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -643,6 +656,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.can_page = CanDebugWidget(self)
         self.workspaces.addTab(self.fault_page, "故障与自检")
         self.workspaces.addTab(self.can_page, "CAN调试")
+        self.music_page=MotorMusicWidget(self)
+        self.workspaces.addTab(self.music_page,"电机音乐")
         self.workspaces.setMinimumSize(0, 0)
         self.workspaces.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Ignored)
         for index in range(self.workspaces.count()):
@@ -672,6 +687,12 @@ class MainWindow(QtWidgets.QMainWindow):
             selected = self.cb_port.findData(find_port())
         if selected >= 0:
             self.cb_port.setCurrentIndex(selected)
+            self._port_baud_default(selected)
+
+    def _port_baud_default(self, index):
+        port = self.cb_port.itemData(index)
+        preferred = 115200 if port and port == find_port() else 921600
+        self.cb_baud.setCurrentIndex(self.cb_baud.findData(preferred))
 
     def toggle_conn(self):
         if self.worker is not None:
@@ -695,7 +716,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress.setValue(0)
         for item in self._tree_items.values():
             item.setText(1, "--")
-        self.worker = SerialWorker(port)
+        baudrate = int(self.cb_baud.currentData() or 115200)
+        self.worker = SerialWorker(port, baudrate)
         self.worker.status.connect(self.lb_conn.setText)
         self.worker.connected.connect(self.on_connected)
         self.worker.finished.connect(self.on_disconnected)
@@ -705,9 +727,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.stats.connect(self.on_stats)
         self.worker.sample.connect(self._on_sample)
         self.can_page.set_worker(self.worker)
+        self.music_page.set_worker(self.worker)
         self.worker.start()
         self.btn_conn.setText("取消连接")
-        self.logmsg(f"正在连接 {port}，连接后自动读取设备参数")
+        self.logmsg(f"正在连接 {port}（{baudrate} bit/s），连接后自动读取设备参数")
         self._update_controls()
 
     def on_connected(self):
@@ -729,6 +752,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.show_result(False, "连接中断，标定结果无法确认")
         self.worker = None
         self.can_page.set_worker(None)
+        self.music_page.set_worker(None)
         self._connected = False
         self._pending_state = None
         self._writes.clear()
@@ -864,7 +888,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in (self.sl_mod, self.sl_freq, self.bt_bench):
             w.setEnabled(bench and not self.worker.latest["fault"])
         self.cb_port.setEnabled(self.worker is None)
+        self.cb_baud.setEnabled(self.worker is None)
         self.btn_refresh.setEnabled(self.worker is None)
+        self.music_page.update_device(self.worker.latest if fresh else {},
+            bool(self._can_drive() and self.worker.latest.get('flags',0)&4 and self.param_cache.get(0x085F,0)>=1))
         self._paint_state()
 
     @staticmethod
@@ -1396,6 +1423,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     continue
                 form.addRow(label, QtWidgets.QLabel("未获取" if value is None else f"{value:.7g} {unit}"))
             form.addRow("扫频",QtWidgets.QLabel("独立操作：点击“电流环扫频 / 波特图”"))
+            enc2_states={0:"未启用",1:"测量中",2:"通信异常",3:"角度无效",4:"运动映射未完成",5:"标定完成"}
+            form.addRow("ENC2 标定",QtWidgets.QLabel(enc2_states.get(int(self._result_data.get(0x084B,-1)),"固件未提供")))
+            for pid,label in ((0x0416,"实测电机角/输出角"),(0x084C,"双编码器映射 R²"),(0x0841,"ENC2方向"),(0x0842,"ENC2机械零位 / °")):
+                value=self._result_data.get(pid)
+                form.addRow(label,QtWidgets.QLabel(f"{value:.6g}" if value is not None and math.isfinite(value) else "未完成"))
             layout.addLayout(form)
             note = QtWidgets.QLabel("R为两档电流斜率估算，L为脉冲估算。扫频已拆分为独立操作；请在完整标定成功后另行启动。齿槽补偿已关闭。\n"
                                    "如需重启后保留，请在结果确认后执行“保存参数”。\n"
@@ -1524,7 +1556,8 @@ class MainWindow(QtWidgets.QMainWindow):
             values = {
                 "device": "未连接", "axis": "--", "fault": "--", "bus": "--",
                 "phase": "--", "dq": "--", "angle": "--", "speed": "--",
-                "position": "--", "rate": "--",
+                "position": "--", "rate": "--", "enc2_angle":"--", "enc2_speed":"--",
+                "enc2_position":"--", "ratio":"--",
             }
             self.lb_readout_note.setText("连接设备后自动显示遥测与状态。控制项在连接并读回关键参数前保持禁用。")
         else:
@@ -1541,13 +1574,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 "phase": " / ".join(f"{latest[k] / 1000.0:.2f}" for k in ("ia", "ib", "ic")) + " A",
                 "dq": f"{latest['id'] / 1000.0:.2f} / {latest['iq'] / 1000.0:.2f} A",
                 "angle": f"{latest['ang']:.2f}° / {latest['ele']:.2f}°",
-                "speed": f"{latest['vel']:.2f} rpm",
-                "position": f"{latest['pos']:.2f}°",
+                "speed": f"{latest.get('enc1_vel',float('nan')):.2f} rpm",
+                "position": f"{latest.get('enc1_pos',float('nan')):.2f}°",
+                "enc2_angle": f"{latest.get('enc2_ang',float('nan')):.2f}°",
+                "enc2_speed": f"{latest.get('enc2_vel',float('nan')):.2f} rpm",
+                "enc2_position": f"{latest.get('enc2_pos',float('nan')):.2f}°",
+                "ratio": f"{latest.get('encoder_ratio',float('nan')):.5g}",
                 "rate": self.lb_rate.text().replace("速率", "").strip(),
             }
             self.lb_readout_note.setText("状态和读数来自最近一帧设备遥测；曲线保留最近采样窗口。")
         for key, value in values.items():
-            self.readout_labels[key].setText(value)
+            self.readout_labels[key].setText(value.replace("nan","--"))
         self.readout_labels["fault"].setStyleSheet(
             "font-size:15pt; font-weight:600; color:#c9302c" if fresh and self.worker.latest["fault"]
             else "font-size:15pt; font-weight:600; color:#278027" if fresh
@@ -1560,7 +1597,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._live_plot_connected = connected
         if connected:
             self.lb_current_view.setText("实时遥测 · 电流环在设备端以25kHz采样")
-            titles = ("三相电流", "d/q 轴电流", "编码器1机械角 / 电角度")
+            titles = ("三相电流", "d/q 轴电流", "ENC1机械角 / 电角度 · ENC2机械角")
         else:
             self.lb_current_view.setText("未连接设备 · 连接后显示三相电流、d/q 电流与编码器1机械角/电角度")
             titles = ("三相电流 · 等待连接", "d/q 电流 · 等待连接", "编码器1机械角 / 电角度 · 等待连接")
@@ -1570,7 +1607,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Telemetry buffers belong to the previous connection. Leaving them
             # visible beneath a “waiting for connection” title looks like live noise.
             for curves in (self.c_cur, self.c_dq, self.c_mot, self.c_vel,
-                           self.c_pos, self.c_duty, self.c_cur_live,
+                           self.c_pos, self.c_mot2, self.c_vel2, self.c_pos2, self.c_duty, self.c_cur_live,
                            self.c_dq_live, self.c_enc_live):
                 for curve in curves.values():
                     curve.setData([], [])
@@ -1677,7 +1714,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.lb_progress.setText("扫频完成 · 正在读取波特图数据" if is_sweep else "完整标定完成 · 正在读取结果")
                     self.lb_cal_hint.setText("读取16个频点的幅值、相位和有效性。" if is_sweep else "完整标定结束；频响测试为独立操作。")
                     self._result_wait = ({0x0220,0x0221,0x0222,0x0223} | set(range(0x0224,0x0274))) if is_sweep else {
-                        0x0100,0x0101,0x0102,0x0107,0x0200,0x0201,0x0207,0x0215,0x0303,0x0304}
+                        0x0100,0x0101,0x0102,0x0107,0x0200,0x0201,0x0207,0x0215,0x0303,0x0304,
+                        0x0416,0x0841,0x0842,0x084B,0x084C}
                     self._result_data.clear()
                     self._result_deadline = now + 4
                     for pid in self._result_wait:
@@ -1737,7 +1775,7 @@ class MainWindow(QtWidgets.QMainWindow):
             cu.setData(x, s[f])
         for f, cu in self.c_enc_live.items():
             cu.setData(x, s[f])
-        for fields in (self.c_vel, self.c_pos):
+        for fields in (self.c_vel, self.c_pos,self.c_mot2,self.c_vel2,self.c_pos2):
             for f, cu in fields.items():
                 cu.setData(x, s[f])
         for f, cu in self.c_duty.items():

@@ -64,7 +64,7 @@ class HostToolTests(unittest.TestCase):
     def test_main_window_has_separate_workspaces_and_faster_redraw(self):
         window = MainWindow()
         labels = [window.workspaces.tabText(i) for i in range(window.workspaces.count())]
-        self.assertEqual(labels, ["控制与校准", "运行曲线", "参数与配置", "故障与自检", "CAN调试"])
+        self.assertEqual(labels, ["控制与校准", "运行曲线", "参数与配置", "故障与自检", "CAN调试", "电机音乐"])
         self.assertEqual(window.timer.interval(), 20)
         self.assertFalse(any("记录器" in window.workspaces.tabText(i)
                              for i in range(window.workspaces.count())))

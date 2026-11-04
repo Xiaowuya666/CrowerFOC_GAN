@@ -17,7 +17,6 @@
 #include "ws2812.h"
 #include "mx_usbx_app.h"
 #include "mx_usb_drd_fs.h"
-#include "usb_cdc_test.h"
 #include "pwm_test.h"
 #include "phase_test.h"
 #include "crowerfoc_proto.h"
@@ -88,7 +87,7 @@ int main(void)
     phase_test_task();
 
     /* Animate the LEDs on a ~20 ms cadence without stalling USB tasks.
-       ws2812_show() blocks interrupts for ~90 us, which would jolt the 40 kHz
+       ws2812_show() blocks interrupts for ~90 us, which would jolt the 25 kHz
        FOC ISR -> hold the refresh while the axis is actively driven. */
     uint32_t now = HAL_GetTick();
     if ((now - last_led) < 20u)

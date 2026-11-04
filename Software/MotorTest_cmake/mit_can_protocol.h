@@ -29,6 +29,20 @@ typedef struct {
   float iq_ff_A;
 } cff_mit_command_t;
 
+/* Unsigned cycle counters wrap naturally; elapsed-time watchdog checks must
+ * remain correct across that wrap. Keep this helper shared with native tests. */
+static inline int cff_mit_watchdog_expired(uint32_t now, uint32_t last,
+                                            uint32_t timeout_cycles) {
+  return (uint32_t)(now - last) > timeout_cycles;
+}
+
+/* FC is an arming request, not a way for CAN to take over a live USB axis. */
+static inline int cff_mit_can_enable_allowed(uint8_t inhibited, uint8_t faulted,
+                                              uint8_t calibrated, uint8_t auto_arm,
+                                              uint8_t idle, uint16_t modulation) {
+  return !inhibited && !faulted && calibrated && auto_arm && idle && modulation == 0u;
+}
+
 static inline uint32_t cff_mit_uint(float x,float lo,float hi,unsigned bits) {
   if(!isfinite(x)) x=0.0f;
   if(x<lo) x=lo;

@@ -9,9 +9,14 @@ import serial.tools.list_ports
 from PyQt5 import QtCore
 from crowerfoc_protocol import *
 
+HEARTBEAT_INTERVAL = 0.2
+
 def find_port():
     for p in serial.tools.list_ports.comports():
-        if "0483" in (p.hwid or "").upper() or "CROWER" in (p.description or "").upper():
+        is_crower_usb = (p.vid == 0x0483 and p.pid == 0x5710) or \
+                        "VID:PID=0483:5710" in (p.hwid or "").upper() or \
+                        "CROWER" in (p.description or "").upper()
+        if is_crower_usb:
             return p.device
     return None
 
@@ -26,11 +31,15 @@ class SerialWorker(QtCore.QThread):
     ack = QtCore.pyqtSignal(int,int,int)
     sample = QtCore.pyqtSignal(object)
 
-    def __init__(self, port):
+    def __init__(self, port, baudrate=115200):
         super().__init__()
         self.port = port
+        self.baudrate = int(baudrate)
         self._stop = threading.Event()
         self._tx = deque()
+        self._audio_control = deque()
+        self._audio_blocks = deque(maxlen=4)
+        self._audio_active = False
         self._lock = threading.Lock()
         self._data_lock = threading.RLock()
         self._queued_gets = set()
@@ -54,6 +63,9 @@ class SerialWorker(QtCore.QThread):
         self._raw_pending = None
         self._control_pending = None
         self._axis_pending = None
+        self._encoder_pending = None
+        self.buf_fields += list(ENCODER_FIELDS)
+        self.data.update({k:np.full(self.n,np.nan,np.float32) for k in ENCODER_FIELDS})
         self.buf_fields += ["ia_raw", "ib_raw", "ic_raw", "sample_flags"]
         self.data.update({k: np.full(self.n, np.nan, np.float32)
                           for k in ("ia_raw", "ib_raw", "ic_raw", "sample_flags")})
@@ -62,7 +74,7 @@ class SerialWorker(QtCore.QThread):
         sp = None
         for k in range(6):
             try:
-                sp = serial.Serial(self.port, 115200, timeout=0.02,
+                sp = serial.Serial(self.port, self.baudrate, timeout=0.02,
                                    write_timeout=0.2, rtscts=False, dsrdtr=False)
                 break
             except Exception as e:
@@ -81,21 +93,32 @@ class SerialWorker(QtCore.QThread):
         next_heartbeat = 0.0
         try:
             while not self._stop.is_set():
+                # Short reads keep real-time PCM flowing without making the
+                # ordinary command/telemetry path spin while audio is off.
+                sp.timeout = 0.001 if self._audio_active else 0.02
                 chunk = sp.read(max(1, min(sp.in_waiting, 8192)))
                 if chunk:
                     buf += chunk
                 self._parse(buf)
                 now = time.monotonic()
-                if now >= next_heartbeat and self.last_telem and now-self.last_telem < TELEMETRY_TIMEOUT:
-                    self._write(encode_frame(MSG_HEARTBEAT))
-                    next_heartbeat = now + 0.2
+                # Heartbeat is a command-channel lease, not a telemetry lease.
+                # Keep it alive while the serial port is open even if telemetry
+                # pauses during mode transitions, calibration, or sweep work.
+                next_heartbeat = self._heartbeat_tick(now, next_heartbeat)
                 if now >= next_tx:
+                    tx_interval = 0.012
                     with self._lock:
-                        packet, pid = self._tx.popleft() if self._tx else (None, None)
+                        if self._audio_control:
+                            packet, pid = self._audio_control.popleft(), None
+                        elif self._audio_active and self._audio_blocks:
+                            packet, pid = self._audio_blocks.popleft(), None
+                            tx_interval = 0.003
+                        else:
+                            packet, pid = self._tx.popleft() if self._tx else (None, None)
                         self._queued_gets.discard(pid)
                     if packet is not None:
                         self._write(packet)
-                        next_tx = now + 0.012
+                        next_tx = now + tx_interval
                 if now - self._t0 >= 0.5:
                     self.fps = (self.count - self._c0) / (now - self._t0)
                     self._t0, self._c0 = now, self.count
@@ -118,6 +141,12 @@ class SerialWorker(QtCore.QThread):
     def _write(self, packet):
         if self.sp.write(packet) != len(packet):
             raise IOError("串口发送不完整")
+
+    def _heartbeat_tick(self, now, next_heartbeat):
+        if now >= next_heartbeat:
+            self._write(encode_frame(MSG_HEARTBEAT))
+            return now + HEARTBEAT_INTERVAL
+        return next_heartbeat
 
     def _parse(self, buf):
         while True:
@@ -146,7 +175,20 @@ class SerialWorker(QtCore.QThread):
                 del buf[:i + 1]
 
     def _dispatch(self, typ, pl):
-        if typ == MSG_ACK and len(pl)==4:
+        if typ == MSG_ENCODERS and len(pl)==36:
+            seq,*values=struct.unpack('<H8fBB',bytes(pl))
+            health,calibration=values[-2:];numbers=values[:8]
+            if all(np.isfinite(v) for v in numbers[:7]):
+                for i in (0,1,3,4,5):numbers[i]*=DEG_PER_RAD
+                for i in (2,6):numbers[i]*=RPM_PER_RAD_S
+                fields=dict(zip(ENCODER_FIELDS,numbers))
+                if not health&1:
+                    for k in ENCODER_FIELDS[:4]:fields[k]=np.nan
+                if not health&2 or not health&4:
+                    for k in ('enc2_ang','enc2_pos','enc2_vel'):fields[k]=np.nan
+                fields.update(encoder_health=health,encoder2_calibration=calibration)
+                self._encoder_pending=(seq,fields)
+        elif typ == MSG_ACK and len(pl)==4:
             command,status,pid=struct.unpack('<BBH',bytes(pl))
             self.ack.emit(command,status,pid)
         elif typ==MSG_AXIS_DIAG and len(pl)==62:
@@ -237,6 +279,14 @@ class SerialWorker(QtCore.QThread):
                 self.data[key][idx]=value;self.latest[key]=value
             self.latest.update(axis)
         self._axis_pending=None
+        pending=self._encoder_pending
+        for key in ENCODER_FIELDS:self.data[key][idx]=np.nan
+        if pending is not None and pending[0]==seq:
+            self.latest.update(pending[1])
+            for key in ENCODER_FIELDS:self.data[key][idx]=pending[1][key]
+        else:
+            for key in ENCODER_FIELDS:self.latest[key]=np.nan
+        self._encoder_pending=None
         self.count += 1
         self.total += 1
         self.last_telem = time.monotonic()
@@ -248,6 +298,9 @@ class SerialWorker(QtCore.QThread):
     def safe_idle(self):
         with self._lock:
             self._tx.clear()
+            self._audio_blocks.clear()
+            self._audio_control.clear()
+            self._audio_active = False
             self._queued_gets.clear()
             self._tx.append((stop_packet(), None))
 
@@ -268,6 +321,32 @@ class SerialWorker(QtCore.QThread):
             self._tx.append((encode_frame(typ, payload), pid))
             if pid is not None:
                 self._queued_gets.add(pid)
+
+    def set_audio_active(self, active):
+        with self._lock:
+            self._audio_active = bool(active)
+
+    def send_audio_control(self, payload):
+        """Priority control for the experimental system-audio stream."""
+        if self._stop.is_set():
+            return
+        with self._lock:
+            self._audio_control.append(encode_frame(MSG_AUDIO, payload))
+
+    def queue_audio_block(self, sequence, pcm):
+        """Queue one bounded-latency signed 8-bit PCM block (no per-block ACK)."""
+        if self._stop.is_set() or not self._audio_active or not pcm or len(pcm) > 55:
+            return False
+        payload = b"\x01" + struct.pack("<HB", int(sequence) & 0xFFFF, len(pcm)) + bytes(pcm)
+        with self._lock:
+            if len(self._audio_blocks) == self._audio_blocks.maxlen:
+                self._audio_blocks.popleft()
+            self._audio_blocks.append(encode_frame(MSG_AUDIO, payload))
+        return True
+
+    def clear_audio_blocks(self):
+        with self._lock:
+            self._audio_blocks.clear()
 
     def get_param(self, pid):
         self.send_msg(MSG_GET, struct.pack("<H", pid))

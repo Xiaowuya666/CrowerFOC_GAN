@@ -49,7 +49,10 @@ hal_uart_handle_t *mx_uart4_uart_init(void)
     return NULL;
   }
 
-  uart_config.baud_rate = 115200;
+  /* UART carries the same 100 Hz diagnostic stream as USB CDC. The full
+     diagnostic set needs more than 115200 bit/s, so use a USB-UART-friendly
+     high rate; the desktop UI exposes the matching setting. */
+  uart_config.baud_rate = 921600;
   uart_config.clock_prescaler = HAL_UART_PRESCALER_DIV1;
   uart_config.word_length = HAL_UART_WORD_LENGTH_8_BIT;
   uart_config.stop_bits = HAL_UART_STOP_BIT_1;

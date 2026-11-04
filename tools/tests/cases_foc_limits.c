@@ -1,6 +1,7 @@
 #include "../../Software/MotorTest_cmake/foc_limits.h"
 #include "../../Software/MotorTest_cmake/calibration_profile.h"
 #include "../../Software/MotorTest_cmake/cogging_compensation.h"
+#include "../../Software/MotorTest_cmake/encoder_pair.h"
 
 int test_entry(void)
 {
@@ -82,12 +83,12 @@ int test_entry(void)
   if (fabsf(r-.096f) > .0001f || fabsf(intercept-.715f) > .0001f) { return 12; }
   if (ph_cal_fit_r(.9f, 2.5f, 4.0f, 5.0f, &r, &intercept)) { return 13; }
   if (ph_cal_fit_r(.9f, 2.5f, 1.2f, 3.0f, &r, &intercept)) { return 14; }
-  if(ph_cal_bw_total_ticks(25000u)!=PH_CAL_BW_TEST_TICKS||PH_CAL_BW_TEST_TICKS!=5463u)return 32;
-  float bw[PH_CAL_BW_TEST_COUNT]={1.0f,1.0f,1.0f,.8f,.5f,.2f};
+  if(ph_cal_bw_total_ticks(25000u)!=21097u)return 32;
+  float bw[PH_CAL_BW_TEST_COUNT]={1,1,1,1,1,1,1,1,1,.8f,.5f,.2f,.1f,.05f,.02f,.01f};
   float cutoff=ph_cal_bw_cutoff_hz(bw);
-  if(!(cutoff>1100.0f&&cutoff<1200.0f))return 33;
-  float flat[PH_CAL_BW_TEST_COUNT]={1,1,1,1,1,1};
-  if(ph_cal_bw_cutoff_hz(flat)!=2001.0f)return 35;
+  if(!(cutoff>1300.0f&&cutoff<1350.0f))return 33;
+  float flat[PH_CAL_BW_TEST_COUNT]={1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+  if(ph_cal_bw_cutoff_hz(flat)!=4001.0f)return 35;
   float sum_sin=100.0f*.5f*.1f*.8f*cosf(.523598776f);
   float sum_cos=-100.0f*.5f*.1f*.8f*sinf(.523598776f);
   if(fabsf(ph_cal_bw_gain(sum_sin,sum_cos,100u,.1f)-.8f)>.001f||
@@ -98,7 +99,7 @@ int test_entry(void)
     float z=hypotf(.09f,6.28318530718f*(float)f*.000085f);
     if(!(command>0.0f&&command<=PH_CAL_BW_COMMAND_A&&command*z<=PH_CAL_MAX_VOLTAGE*.7001f))return 36;
   }
-  if(ph_cal_progress(6,0)!=0.0f||ph_cal_progress(6,PH_CAL_BW_TEST_TICKS)!=100.0f)return 37;
+  if(ph_cal_progress(6,0)!=0.0f||ph_cal_progress(6,ph_cal_bw_total_ticks(25000u))!=100.0f)return 37;
   if (ph_cal_progress(3, 0) >= ph_cal_progress(3, 100000)) { return 15; }
   float alpha, beta;
   ph_clarke_three(1.0f, -.5f, -.5f, &alpha, &beta);
@@ -143,5 +144,41 @@ int test_entry(void)
       fabsf(cff_cogging_lookup_a(cog,0.0f,0.0f))>.00001f) { return 24; }
   nf[0]=0u;
   if (cff_cogging_finish(forward,reverse,nf,nr,cog)) { return 25; }
+  /* A newly identified low-L motor must use fresh commissioning gains.
+     Exercise two inductances with two-cycle actuation delay and PWM rounding. */
+  for (unsigned trial=0;trial<2;trial++) {
+    float r=.06f,l=trial?100e-6f:20e-6f,kp,ki;
+    ph_cal_current_gains(0,r,l,&kp,&ki);
+    if (kp!=.05f || ki!=100.0f) return 26;
+    ph_cal_current_gains(2,r,l,&kp,&ki);
+    if (fabsf(kp/l-1570.7963f)>1.0f || fabsf(ki/r-1570.7963f)>1.0f) return 27;
+    float current=0,integral=0,qintegral=0,delay[2]={0},peak=0;
+    float decay=expf(-r/(25000.0f*l));
+    for(unsigned n=0;n<12500;n++) {
+      float vd,vq;
+      ph_current_pi_ff_step(5-current,0,kp,ki,1.0f/25000,4,0,0,
+                            &integral,&qintegral,&vd,&vq);
+      float applied=roundf(vd*2880.0f/24.0f)*24.0f/2880.0f;
+      current=decay*current+(1-decay)*delay[n%2]/r;
+      delay[n%2]=applied;
+      if(current>peak)peak=current;
+    }
+    if(fabsf(current-5)>.05f || peak>6.0f) return 28;
+  }
+  for(int direction=-1;direction<=1;direction+=2) {
+    cff_encoder_pair_t pair;cff_pair_reset(&pair);
+    for(unsigned i=0;i<401;i++) {
+      float motor=(float)i*.015f;
+      float output=(float)direction*motor/9.0f+0.0001f*sinf((float)i*.7f);
+      cff_pair_sample(&pair,motor,output);
+    }
+    float ratio,quality;int relative_dir;
+    if(!cff_pair_finish(&pair,&ratio,&relative_dir,&quality) ||
+       fabsf(ratio-9.0f)>.01f || relative_dir!=direction || quality<.999f)return 36;
+  }
+  cff_encoder_pair_t stationary;cff_pair_reset(&stationary);
+  for(unsigned i=0;i<200;i++)cff_pair_sample(&stationary,0.0f,(float)i*.001f);
+  float pair_ratio,pair_quality;int pair_dir;
+  if(cff_pair_finish(&stationary,&pair_ratio,&pair_dir,&pair_quality))return 37;
   return 0;
 }

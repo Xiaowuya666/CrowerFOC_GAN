@@ -13,7 +13,7 @@ from crowerfoc_transport import SerialWorker
 from crowerfoc_protocol import *
 from crowerfoc_gui import MainWindow
 from axis_extensions import configuration_document,parse_configuration,validate_extended
-from mit_can import pack_control,unpack_control,special_command,unpack_feedback,CMD_ENABLE,CMD_DISABLE,CMD_ZERO
+from mit_can import pack_control,unpack_control,special_command,unpack_feedback,CMD_ENABLE,CMD_DISABLE,CMD_ZERO,_uint
 APP=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 class ExtensionTests(unittest.TestCase):
     def test_mit_can_control_and_special_frame_codec(self):
@@ -35,6 +35,27 @@ class ExtensionTests(unittest.TestCase):
         self.assertAlmostEqual(fb['velocity_rad_s'],0,places=1)
         self.assertAlmostEqual(fb['iq_A'],0,places=1)
         self.assertIsNone(fb['temperature_C']);self.assertEqual(fb['error'],1)
+
+    def test_mit_feedback_extremes_and_half_count_rounding_match_firmware(self):
+        # The firmware rounds positive quantizer values with +0.5 then truncates.
+        tie_value=-40.0+102.5*80.0/4095.0
+        self.assertEqual(_uint(tie_value,-40.0,40.0,12),103)
+        low=unpack_feedback(bytes((1,0,0,0,0,0,0,0xA5)))
+        self.assertEqual(low['node_id'],1)
+        self.assertAlmostEqual(low['position_rad'],-12.5,places=4)
+        self.assertAlmostEqual(low['velocity_rad_s'],-30.0,places=2)
+        self.assertAlmostEqual(low['iq_A'],-40.0,places=2)
+        self.assertEqual(low['temperature_C'],-40)
+        self.assertEqual(low['error'],0xA5)
+        high=unpack_feedback(bytes((7,0xFF,0xFF,0xFF,0xFF,0xFF,240,0)))
+        self.assertEqual(high['node_id'],7)
+        self.assertAlmostEqual(high['position_rad'],12.5,places=4)
+        self.assertAlmostEqual(high['velocity_rad_s'],30.0,places=2)
+        self.assertAlmostEqual(high['iq_A'],40.0,places=2)
+        self.assertEqual(high['temperature_C'],200)
+        self.assertEqual(high['error'],0)
+        for malformed in (bytes(7),bytes(9)):
+            with self.assertRaises(ValueError):unpack_feedback(malformed)
 
     def test_units_roundtrip_and_speed_has_no_100rad_limit(self):
         for pid,value in ((0x0402,200),(0x0504,200),(0x0503,720),(0x0200,180),(0x0301,.1),(0x0202,50),(0x0101,96.2),(0x0102,39.1)):

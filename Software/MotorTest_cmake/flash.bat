@@ -1,28 +1,93 @@
 @echo off
-setlocal
-rem Flash MotorTest.elf to STM32C562CET6 via DAPLink (CMSIS-DAP), then
-rem perform an explicit software reset (SYSRESETREQ) and verify the core runs.
-rem
-rem --no-reset on 'flash' avoids relying on the probe's default reset.
-rem 'reset --method sysresetreq' uses the ARM core SYSRESETREQ, which does not
-rem depend on the nRESET pin being wired to the board.
+setlocal EnableExtensions
+title CrowerFOC - Identify and Flash
+set "SCRIPT_DIR=%~dp0"
 
-set PYOCD=C:\Users\Crowe\Desktop\MyMotor_ws\.tools\pyocd-venv\Scripts\pyocd.exe
-set ELF=%~dp0build\debug_GCC_STM32C562CET6\MotorTest.elf
-set TARGET=stm32c562cet6
+set "PS_ARGS="
+if "%~1"=="" goto run
+if /I "%~1"=="help" goto help
+if /I "%~1"=="/?" goto help
+if /I "%~1"=="-h" goto help
 
-if not exist "%PYOCD%" ( echo [flash] pyocd not found: %PYOCD% & exit /b 1 )
-if not exist "%ELF%"   ( echo [flash] elf not found: %ELF% & echo build first: cmake --build --preset debug_GCC_STM32C562CET6 & exit /b 1 )
+:parse
+if "%~1"=="" goto run
+if /I "%~1"=="list" (
+    set "PS_ARGS=%PS_ARGS% -ListOnly"
+    shift
+    goto parse
+)
+if /I "%~1"=="--list" (
+    set "PS_ARGS=%PS_ARGS% -ListOnly"
+    shift
+    goto parse
+)
+if /I "%~1"=="skip-build" (
+    set "PS_ARGS=%PS_ARGS% -SkipBuild"
+    shift
+    goto parse
+)
+if /I "%~1"=="--skip-build" (
+    set "PS_ARGS=%PS_ARGS% -SkipBuild"
+    shift
+    goto parse
+)
+if /I "%~1"=="skip-verify" (
+    set "PS_ARGS=%PS_ARGS% -SkipVerify"
+    shift
+    goto parse
+)
+if /I "%~1"=="--skip-verify" (
+    set "PS_ARGS=%PS_ARGS% -SkipVerify"
+    shift
+    goto parse
+)
+if /I "%~1"=="uid" goto parse_uid
+if /I "%~1"=="--uid" goto parse_uid
+if /I "%~1"=="firmware" goto parse_firmware
+if /I "%~1"=="--firmware" goto parse_firmware
+echo [flash] Unknown option: %~1
+goto help_error
 
-echo [flash] programming %ELF%
-"%PYOCD%" flash --target %TARGET% --no-reset "%ELF%"
-if errorlevel 1 ( echo [flash] FAILED & exit /b 1 )
+:parse_uid
+if "%~2"=="" echo [flash] Missing UID value.& goto help_error
+set "PS_ARGS=%PS_ARGS% -ProbeUid "%~2""
+shift
+shift
+goto parse
 
-echo [flash] reset (sysresetreq)
-"%PYOCD%" reset --target %TARGET% --method sysresetreq
-if errorlevel 1 ( echo [flash] reset FAILED & exit /b 1 )
+:parse_firmware
+if "%~2"=="" echo [flash] Missing ELF path.& goto help_error
+set "PS_ARGS=%PS_ARGS% -FirmwarePath "%~2""
+shift
+shift
+goto parse
 
-echo [flash] core state:
-"%PYOCD%" commander -M attach -t %TARGET% -c "status"
+:run
+echo [flash] Running from %SCRIPT_DIR%
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%flash_fast.ps1" %PS_ARGS%
+set "RESULT=%ERRORLEVEL%"
+if not "%RESULT%"=="0" (
+    echo.
+    echo [flash] Did not complete. Read the error above.
+)
+echo.
+pause
+exit /b %RESULT%
 
-echo [flash] done
+:help
+echo Usage from Command Prompt:
+echo   flash.bat                         Build, detect probe, flash, reset, verify UART
+echo   flash.bat list                    Detect probe only; no build or flash
+echo   flash.bat uid 846703532218        Select a specific probe UID
+echo   flash.bat skip-build              Flash the existing default ELF
+echo   flash.bat firmware "C:\path\MotorTest.elf"
+echo   flash.bat skip-verify             Skip passive UART verification
+echo Options may be combined, for example: flash.bat uid 846703532218 skip-build
+echo.
+echo This BAT file is the user entry point. It runs the PowerShell implementation internally.
+exit /b 0
+
+:help_error
+echo.
+call "%~f0" help
+exit /b 2

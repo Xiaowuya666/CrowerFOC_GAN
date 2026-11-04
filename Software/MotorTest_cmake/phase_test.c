@@ -2,13 +2,13 @@
   * @file    phase_test.c
   * @brief   25 kHz cycle-by-cycle loop: ADC+DMA current sampling + open-loop V/f.
   *
-  *  - TIM1 center-aligned 40 kHz, 3 complementary pairs + deadtime, RCR=1.
+  *  - TIM1 center-aligned 25 kHz, 3 complementary pairs + deadtime, RCR=1.
   *  - Every PWM period (TIM1 update ISR):
   *      ADC1 regular (IN4/IN5/IN6) is converted by LPDMA1 (peripheral request)
   *      into adc_buf[3]; the ISR waits for the sequence end and reads it, then
   *      runs the open-loop V/f SPWM, the overcurrent trip, and (every 400th
   *      period) pushes a sample into a ring.
-  *  - The main loop only drains the ring -> USB CDC-ACM at ~100 Hz.
+  *  - The main loop drains telemetry to USB CDC-ACM and UART4 at ~100 Hz.
   *
   *  Motor is safe on power-up: g_ph_mod_milli = 0 (no drive).
   *
@@ -28,6 +28,7 @@
 #include "stm32c5xx_hal_spi.h"
 #include "stm32c5xx_hal_gpio.h"
 #include "mx_spi3.h"
+#include "mx_uart4.h"
 #include "mx_gpio_default.h"
 #include "crowerfoc_proto.h"
 #include "current_filter.h"
@@ -38,6 +39,7 @@
 #include "axis_config.h"
 #include "config_store.h"
 #include "motion_control.h"
+#include "encoder_pair.h"
 #include "axis_parameters.h"
 #include "mit_can_protocol.h"
 #include "stm32c5xx_ll_iwdg.h"
@@ -58,6 +60,8 @@
 #define PH_SEND_DECIM    250u           /* 25 kHz / 250 = 100 Hz frames         */
 
 #define PH_TXRING        1024u          /* SPSC byte ring: ISR writes, main reads */
+#define PH_UART_TXRING   8192u
+#define PH_UART_RXRING   512u
 
 volatile uint16_t g_ph_mod_milli = 0u;      /* SAFE default: no drive */
 volatile uint16_t g_ph_freq_deci = 20u;     /* 2.0 Hz                  */
@@ -229,10 +233,34 @@ static volatile float s_observer_mech, s_vel_raw;
 static volatile float s_enc2_pos, s_enc2_vel;
 static volatile uint8_t s_enc2_ok;
 static volatile uint32_t s_enc2_fail;
+static volatile uint16_t s_enc2_raw_word, s_enc2_safety;
+static volatile uint8_t s_enc2_error;
+static volatile uint32_t s_enc2_comm_ok;
+static volatile float s_enc2_mech, s_enc2_cal_quality;
+static volatile uint8_t s_enc2_cal_status;
+static cff_encoder_pair_t s_enc2_pair;
 static uint8_t s_enc2_enabled;
 static int8_t s_enc2_dir=1;
 static float s_enc2_offset;
 static volatile float s_gear_ratio=NAN;
+typedef struct { uint16_t hz,ms; } ph_music_note_t;
+#define PH_MUSIC_NOTES 1024u
+static ph_music_note_t s_music_notes[PH_MUSIC_NOTES];
+static uint16_t s_music_expected,s_music_loaded;
+static volatile uint16_t s_music_index;
+static uint32_t s_music_tick;
+static float s_music_phase,s_music_amplitude;
+static uint8_t s_music_reason,s_music_oc;
+#define PH_AUDIO_RING 256u
+#define PH_AUDIO_RATE 8000u
+static volatile int8_t s_audio_ring[PH_AUDIO_RING];
+static volatile uint16_t s_audio_head,s_audio_tail,s_audio_seq;
+static volatile uint32_t s_audio_last_cycle,s_audio_phase_acc;
+static volatile float s_audio_amplitude,s_audio_sample;
+static uint8_t s_audio_oc;
+static cff_motion_t s_music_motion;
+static volatile float s_music_speed_rpm,s_music_speed_current;
+static uint8_t s_music_motion_div;
 static uint16_t s_enc_mod1, s_enc_mod2;
 static volatile float s_enc_delay_us;
 static uint8_t s_enc_config_valid;
@@ -252,6 +280,7 @@ static volatile float s_can_position_zero;
 static uint8_t s_can_auto_arm=1u, s_can_inhibit;
 static volatile float s_can_current;
 static uint8_t s_axis_mail[62];
+static uint8_t s_encoders_mail[36];
 static float s_enc_age_used, s_vq_out, s_id_target, s_iq_target, s_voltage_limit;
 #define PH_HOST_TIMEOUT_CYCLES 108000000u /* 750ms; independent of host GUI timers */
 #define PH_ENC_PERIOD_CYCLES 72000u /* 500 us at 144 MHz; main-loop best effort */
@@ -358,6 +387,15 @@ static volatile uint16_t s_tx_tail = 0u;
 static uint8_t  s_txbuf[544];
 static uint8_t  s_tx_busy = 0u;
 static uint32_t s_tx_len = 0u;
+static volatile uint8_t s_uart_txring[PH_UART_TXRING];
+static volatile uint16_t s_uart_tx_head, s_uart_tx_tail;
+static volatile uint8_t s_uart_rxring[PH_UART_RXRING];
+static volatile uint16_t s_uart_rx_head, s_uart_rx_tail;
+static uint8_t s_uart_rxbuf[128];
+static volatile uint8_t s_uart_rx_overflow;
+static volatile uint32_t s_uart_last_frame_cycle;
+typedef struct { uint8_t data[64]; uint8_t len; } ph_rx_parser_t;
+static ph_rx_parser_t s_uart_parser, s_usb_parser;
 /* ISR prepares payloads; only main encodes CRC and writes the USB ring.
    This also removes the old ISR/main multi-producer race on s_tx_head. */
 static uint8_t s_telem_mail[CFF_TELEM_LEN], s_raw_mail[CFF_CURRENT_RAW_LEN];
@@ -367,8 +405,6 @@ static volatile uint8_t s_telem_due = 0u;
 static volatile uint16_t s_telem_duty[3];
 
 static uint8_t  s_rxbuf[64];
-static uint8_t  s_cmd[64];
-static uint8_t  s_cmd_len = 0u;
 
 /* ------------------------------------------------------------------------- */
 
@@ -390,24 +426,41 @@ static uint8_t ph_crc8(const uint8_t *d, uint32_t n)
 static void ph_tx_frame(uint8_t type, const uint8_t *pl, uint8_t len)
 {
   uint16_t need = (uint16_t)(4u + (uint16_t)len + 1u);
-  uint16_t head = s_tx_head;
-  uint16_t used = (uint16_t)((head - s_tx_tail) & (PH_TXRING - 1u));
-  if ((uint16_t)(used + need) >= PH_TXRING) { g_ph_dropped++; return; }
-
   uint8_t tmp[4u + CFF_MAX_PAYLOAD + 1u];
   tmp[0] = CFF_SYNC0; tmp[1] = CFF_SYNC1; tmp[2] = type; tmp[3] = len;
   for (uint16_t i = 0u; i < len; i++) { tmp[4u + i] = pl[i]; }
   tmp[4u + len] = ph_crc8(&tmp[2], (uint32_t)len + 2u);
 
-  for (uint16_t i = 0u; i < need; i++)
-  {
-    s_txring[head] = tmp[i];
-    head = (uint16_t)((head + 1u) & (PH_TXRING - 1u));
+  /* USB and UART have independent queues; a disconnected USB host must not
+     block UART diagnostics, and vice versa. */
+  if (s_cdc != NULL) {
+    uint16_t head = s_tx_head;
+    uint16_t used = (uint16_t)((head - s_tx_tail) & (PH_TXRING - 1u));
+    if ((uint16_t)(used + need) < PH_TXRING) {
+      for (uint16_t i = 0u; i < need; i++) {
+        s_txring[head] = tmp[i];
+        head = (uint16_t)((head + 1u) & (PH_TXRING - 1u));
+      }
+      s_tx_head = head;
+    } else {
+      g_ph_dropped++;
+    }
   }
-  s_tx_head = head;
+  uint16_t uart_head = s_uart_tx_head;
+  uint16_t uart_used = (uint16_t)((uart_head - s_uart_tx_tail) & (PH_UART_TXRING - 1u));
+  if ((uint16_t)(uart_used + need) < PH_UART_TXRING) {
+    for (uint16_t i = 0u; i < need; i++) {
+      s_uart_txring[uart_head] = tmp[i];
+      uart_head = (uint16_t)((uart_head + 1u) & (PH_UART_TXRING - 1u));
+    }
+    s_uart_tx_head = uart_head;
+    UART4->CR1 |= USART_CR1_TXEIE_TXFNFIE;
+  } else {
+    g_ph_dropped++;
+  }
 }
 
-/* Build and queue one telemetry frame (called from the 40 kHz ISR). */
+/* Build and queue one telemetry frame. */
 static int16_t ph_milliamp_saturate(float amps)
 {
   float v = amps * 1000.0f;
@@ -476,6 +529,13 @@ static void ph_tx_telem(uint16_t ia_raw, uint16_t ib_raw, uint16_t ic_raw,
     control_active?s_id_out:0,control_active?s_iq_out:0,s_fet_temp,s_motor_temp,s_bus_current,s_power,(float)s_motion.traj.done,
     (float)s_command_source,(float)(!s_can_inhibit),s_gear_ratio};
   s_axis_mail[0]=(uint8_t)s_seq;s_axis_mail[1]=(uint8_t)(s_seq>>8);memcpy(s_axis_mail+2,axis,sizeof(axis));
+  const float encoders[8]={s_mech,s_pos,s_vel,ph_encoder_elec(),s_enc2_mech,
+    s_enc2_dir*s_enc2_pos-s_enc2_offset,s_enc2_dir*s_enc2_vel,s_gear_ratio};
+  s_encoders_mail[0]=(uint8_t)s_seq;s_encoders_mail[1]=(uint8_t)(s_seq>>8);
+  memcpy(s_encoders_mail+2,encoders,sizeof(encoders));
+  s_encoders_mail[34]=(uint8_t)((g_ph_enc_ok?1u:0u)|(s_enc2_enabled?2u:0u)|
+    (s_enc2_ok?4u:0u)|((s_enc2_error&0x0Bu)==0u&&s_enc2_comm_ok?8u:0u));
+  s_encoders_mail[35]=s_enc2_cal_status;
   const float control[12] = { control_active ? s_id_target : 0.0f,
     control_active ? s_iq_target : 0.0f, control_active ? s_vd_out : 0.0f,
     control_active ? s_vq_out : 0.0f,
@@ -617,6 +677,17 @@ static float ph_get_param(uint16_t id, uint8_t *ok)
     case 0x0844: return (float)s_enc2_fail;
     case 0x0845: return s_enc2_pos;
     case 0x0846: return s_enc2_vel;
+    case 0x0847: return (float)s_enc2_raw_word;
+    case 0x0848: return (float)s_enc2_safety;
+    case 0x0849: return (float)s_enc2_error;
+    case 0x084A: return (float)s_enc2_comm_ok;
+    case 0x084B: return (float)s_enc2_cal_status;
+    case 0x084C: return s_enc2_cal_quality;
+    case 0x0850: return (float)s_music_loaded;
+    case 0x0851: return (float)s_music_index;
+    case 0x0852: return g_ph_state==CFF_AXIS_MUSIC?1.0f:0.0f;
+    case 0x0853: return (float)s_music_reason;
+    case 0x085F: return 1.0f;
     default: *ok = 0u; return 0.0f;
   }
 }
@@ -634,6 +705,8 @@ static void ph_safe_stop(uint16_t fault)
   s_motion.initialized=0; s_can_enabled=0; s_can_inhibit=1u; s_command_source=0;
   s_config_pending=0; s_power=s_bus_current=0;
   s_id_int = 0.0f; s_iq_int = 0.0f; s_vel_int = 0.0f;
+  s_music_motion.initialized=0;s_music_speed_current=0.0f;s_music_motion_div=0u;
+  s_audio_head=s_audio_tail; s_audio_sample=0.0f; s_audio_phase_acc=0u;
   TIM1->BDTR &= ~TIM_BDTR_MOE;
   __set_PRIMASK(primask);
 }
@@ -668,6 +741,8 @@ static void ph_request_state(uint8_t requested)
     s_trace_state = 1u; s_trace_next = 0u; s_trace_post = 0u; s_trace_trigger = 0u;
   }
   if (requested == CFF_AXIS_CALIBRATION) {
+    cff_pair_reset(&s_enc2_pair);s_enc2_cal_quality=0;
+    s_enc2_cal_status=s_enc2_enabled?1u:0u;s_gear_ratio=NAN;
     s_cal_finalize_pending = 0u;
     s_bw_step=0u; s_bw_tick=0u; s_bw_measured_hz=0.0f;
     s_bw_gain_1k=0.0f; s_bw_lag_1k_deg=0.0f; s_bw_pass=0u;
@@ -789,7 +864,7 @@ static void ph_save_config(void) {
      SysTick stays enabled for HAL timeouts. Re-zero before allowing a drive. */
   TIM1->BDTR&=~TIM_BDTR_MOE; NVIC_DisableIRQ(TIM1_UPD_IRQn);
   int ok=cff_store_save(&s_cfg,s_calibrated,s_cal_quality,s_cogging_map_ma,s_cogging_valid,
-                        s_enc2_enabled,s_enc2_dir,s_enc2_offset);
+                        s_enc2_enabled,s_enc2_dir,s_enc2_offset,s_gear_ratio,s_enc2_cal_quality);
   LL_ADC_ClearFlag(ADC1,LL_ADC_FLAG_JEOS|LL_ADC_FLAG_JEOC);
   LL_TIM_ClearFlag_UPDATE(TIM1);NVIC_ClearPendingIRQ(TIM1_UPD_IRQn);
   memset(s_zero_acc,0,sizeof(s_zero_acc));s_zero_remaining=408;
@@ -810,6 +885,80 @@ static void ph_handle_cmd(uint8_t type, const uint8_t *pl, uint8_t len)
 {
   switch (type)
   {
+    case CFF_MSG_MUSIC: {
+      uint8_t status=1;
+      if(len && pl[0]==3u) {
+        if(g_ph_state==CFF_AXIS_MUSIC)ph_safe_stop(0);
+        status=0;
+      } else if(g_ph_state!=CFF_AXIS_IDLE || g_ph_mod_milli) status=2;
+      else if(len==3u && pl[0]==0u) {
+        uint16_t n=(uint16_t)(pl[1]|(uint16_t)pl[2]<<8);
+        if(n>0u&&n<=PH_MUSIC_NOTES){s_music_loaded=0;s_music_expected=n;status=0;}
+      } else if(len>=7u && pl[0]==1u && (len-3u)%4u==0u) {
+        uint16_t offset=(uint16_t)(pl[1]|(uint16_t)pl[2]<<8);
+        unsigned n=(len-3u)/4u;
+        if(offset==s_music_loaded && offset+n<=s_music_expected) {
+          status=0;
+          for(unsigned i=0;i<n;i++) {
+            const uint8_t *q=pl+3u+4u*i;
+            uint16_t hz=(uint16_t)(q[0]|(uint16_t)q[1]<<8),ms=(uint16_t)(q[2]|(uint16_t)q[3]<<8);
+            if((hz && (hz<80u||hz>4000u))||ms<10u||ms>60000u){status=1;break;}
+          }
+          if(!status){memcpy(s_music_notes+offset,pl+3u,n*4u);s_music_loaded+=(uint16_t)n;}
+        }
+      } else if((len==5u||len==9u) && pl[0]==2u) {
+        float amp,rotation_rpm=0.0f;memcpy(&amp,pl+1,4);
+        if(len==9u)memcpy(&rotation_rpm,pl+5u,4u);
+        if(isfinite(amp)&&amp>=0.05f&&amp<=5.0f&&isfinite(rotation_rpm)&&fabsf(rotation_rpm)<=10.0f&&s_music_loaded&&
+           s_music_loaded==s_music_expected&&s_calibrated&&!g_ph_fault&&g_ph_enc_ok&&
+           s_enc_seen&&s_thermal_scale>0&&fabsf(s_vel)<2.0f&&
+           (uint32_t)(ph_clock_now()-s_enc_cycle)<PH_ENC_MAX_AGE_CYCLES) {
+          uint32_t mask=__get_PRIMASK();__disable_irq();
+          s_music_amplitude=amp;s_music_index=0;s_music_tick=0;s_music_phase=0;
+          s_music_speed_rpm=rotation_rpm;s_music_speed_current=0.0f;s_music_motion.initialized=0;s_music_motion_div=0u;
+          s_music_reason=0;s_music_oc=0;s_id_int=s_iq_int=0;
+          s_command_cycle=ph_clock_now();s_command_source=1;g_ph_state=CFF_AXIS_MUSIC;
+          __set_PRIMASK(mask);status=0;
+        } else status=2;
+      }
+      ph_ack(type,status,s_music_loaded);break;
+    }
+    case CFF_MSG_AUDIO: {
+      uint8_t status=1u;
+      if(len==1u && pl[0]==2u) {
+        if(g_ph_state==CFF_AXIS_AUDIO) ph_safe_stop(0u);
+        status=0u;
+      } else if((len==7u||len==11u) && pl[0]==0u) {
+        float amp;memcpy(&amp,pl+1u,4u);
+        uint16_t requested_rate=(uint16_t)(pl[5u]|((uint16_t)pl[6u]<<8));
+        float rotation_rpm=0.0f;if(len==11u)memcpy(&rotation_rpm,pl+7u,4u);
+        if(requested_rate==PH_AUDIO_RATE && isfinite(rotation_rpm)&&fabsf(rotation_rpm)<=10.0f &&
+           g_ph_state==CFF_AXIS_IDLE && !g_ph_mod_milli && isfinite(amp) && amp>=0.05f && amp<=5.0f &&
+           s_calibrated && !g_ph_fault && g_ph_enc_ok && s_enc_seen && s_thermal_scale>0.0f &&
+           fabsf(s_vel)<2.0f && (uint32_t)(ph_clock_now()-s_enc_cycle)<PH_ENC_MAX_AGE_CYCLES) {
+          uint32_t mask=__get_PRIMASK();__disable_irq();
+          s_audio_head=s_audio_tail=0u;s_audio_seq=0u;s_audio_phase_acc=0u;s_audio_sample=0.0f;
+          s_audio_amplitude=amp;s_audio_oc=0u;s_audio_last_cycle=ph_clock_now();
+          s_music_speed_rpm=rotation_rpm;s_music_speed_current=0.0f;s_music_motion.initialized=0;s_music_motion_div=0u;
+          s_id_int=s_iq_int=0.0f;s_command_cycle=ph_clock_now();s_command_source=1u;g_ph_state=CFF_AXIS_AUDIO;
+          __set_PRIMASK(mask);status=0u;
+        } else status=2u;
+      } else if(g_ph_state==CFF_AXIS_AUDIO && len>=5u && pl[0]==1u &&
+                pl[3]>0u && pl[3]<PH_AUDIO_RING && len==(uint8_t)(4u+pl[3])) {
+        uint16_t seq=(uint16_t)(pl[1]|((uint16_t)pl[2]<<8));
+        uint16_t head=s_audio_head,tail=s_audio_tail;
+        uint16_t used=(uint16_t)((head-tail)&(PH_AUDIO_RING-1u));
+        uint16_t free=(uint16_t)(PH_AUDIO_RING-1u-used);
+        if(free>=pl[3]) {
+          for(uint8_t i=0u;i<pl[3];i++) {
+            s_audio_ring[head]=(int8_t)pl[4u+i];head=(uint16_t)((head+1u)&(PH_AUDIO_RING-1u));
+          }
+          __DMB();s_audio_head=head;s_audio_seq=seq;s_audio_last_cycle=ph_clock_now();status=0u;
+        } else status=3u;
+      }
+      if(len==0u || pl[0]!=1u || status) ph_ack(type,status,(uint16_t)s_audio_head);
+      break;
+    }
     /* ---- legacy bench commands (V/f test) ---- */
     case 0x01u: if (len == 2u) {
       uint16_t mod = (uint16_t)(pl[0] | ((uint16_t)pl[1] << 8));
@@ -886,34 +1035,37 @@ static void ph_handle_cmd(uint8_t type, const uint8_t *pl, uint8_t len)
 }
 
 /* Host->device: AA 55 | type | len | <payload> | crc8(type..payload) */
-static void ph_parse_rx(const uint8_t *b, uint32_t n)
+static void ph_parse_rx(ph_rx_parser_t *parser, const uint8_t *b, uint32_t n)
 {
+  uint8_t *cmd = parser->data;
+  uint8_t *cmd_len = &parser->len;
   for (uint32_t i = 0u; i < n; i++)
   {
     uint8_t c = b[i];
-    if (s_cmd_len == 0u)
+    if (*cmd_len == 0u)
     {
-      if (c == CFF_SYNC0) { s_cmd[0] = c; s_cmd_len = 1u; }
+      if (c == CFF_SYNC0) { cmd[0] = c; *cmd_len = 1u; }
     }
-    else if (s_cmd_len == 1u)
+    else if (*cmd_len == 1u)
     {
-      if (c == CFF_SYNC1) { s_cmd[1] = c; s_cmd_len = 2u; }
-      else if (c != CFF_SYNC0) { s_cmd_len = 0u; }
+      if (c == CFF_SYNC1) { cmd[1] = c; *cmd_len = 2u; }
+      else if (c != CFF_SYNC0) { *cmd_len = 0u; }
     }
     else
     {
-      s_cmd[s_cmd_len++] = c;
-      if (s_cmd_len >= 4u)
+      cmd[(*cmd_len)++] = c;
+      if (*cmd_len >= 4u)
       {
-        uint32_t total = (uint32_t)s_cmd[3] + 5u;   /* 2 sync + type + len + payload + crc */
-        if (total > (uint32_t)sizeof(s_cmd)) { s_cmd_len = 0u; }
-        else if (s_cmd_len >= total)
+        uint32_t total = (uint32_t)cmd[3] + 5u;   /* 2 sync + type + len + payload + crc */
+        if (total > sizeof(parser->data)) { *cmd_len = 0u; }
+        else if (*cmd_len >= total)
         {
-          if (ph_crc8(&s_cmd[2], (uint32_t)s_cmd[3] + 2u) == s_cmd[total - 1u])
+          if (ph_crc8(&cmd[2], (uint32_t)cmd[3] + 2u) == cmd[total - 1u])
           {
-            ph_handle_cmd(s_cmd[2], &s_cmd[4], s_cmd[3]);
+            if (parser == &s_uart_parser) { s_uart_last_frame_cycle = ph_clock_now(); }
+            ph_handle_cmd(cmd[2], &cmd[4], cmd[3]);
           }
-          s_cmd_len = 0u;
+          *cmd_len = 0u;
         }
       }
     }
@@ -1027,7 +1179,9 @@ static void ph_foc_run(float elec, float id_ref, float iq_ref,
   float idm =  ialpha * cs + ibeta * sn;
   float iqm = -ialpha * sn + ibeta * cs;
 
-  float lim = (g_ph_state == CFF_AXIS_CALIBRATION ? PH_CAL_CURRENT_LIMIT_A : s_cfg.current_limit)*s_thermal_scale;
+  float lim = (g_ph_state == CFF_AXIS_CALIBRATION ? PH_CAL_CURRENT_LIMIT_A :
+               g_ph_state == CFF_AXIS_MUSIC ? fminf(s_cfg.current_limit,5.0f) :
+               g_ph_state == CFF_AXIS_AUDIO ? fminf(s_cfg.current_limit,5.0f) : s_cfg.current_limit)*s_thermal_scale;
   float idc = id_ref, iqc = iq_ref;
   if (idc >  lim) { idc =  lim; } else if (idc < -lim) { idc = -lim; }
   if (iqc >  lim) { iqc =  lim; } else if (iqc < -lim) { iqc = -lim; }
@@ -1035,6 +1189,9 @@ static void ph_foc_run(float elec, float id_ref, float iq_ref,
 
   float dt = 1.0f / (float)PH_ISR_HZ;
   float kp = s_cfg.current_gain_p, ki = s_cfg.current_gain_i;
+  if (g_ph_state==CFF_AXIS_CALIBRATION && s_cal_ph<6u) {
+    ph_cal_current_gains(s_cal_ph,s_cfg.phase_resistance,s_cfg.phase_inductance,&kp,&ki);
+  }
   float ed = idc - idm;
   float eq = iqc - iqm;
   float vd, vq;
@@ -1074,13 +1231,42 @@ static void ph_foc_run(float elec, float id_ref, float iq_ref,
   float pa=(2.0f*pva-pvb-pvc)/3.0f, pb=(pvb-pvc)*0.57735026919f;
   float actual_vd=pa*output_cs+pb*output_sn;
   float actual_vq=-pa*output_sn+pb*output_cs;
-  s_id_int=actual_vd-kp*ed-ffd;
-  s_iq_int=actual_vq-kp*eq-ffq;
+  /* Preserve sub-PWM-LSB integral accumulation when no voltage is clipped.
+     Resetting it to quantized duty every cycle creates a DC error deadband. */
+  float phase_span=fmaxf(va,fmaxf(vb,vc))-fminf(va,fminf(vb,vc));
+  if (applied<0.999f || phase_span>s_vbus) {
+    s_id_int=actual_vd-kp*ed-ffd;
+    s_iq_int=actual_vq-kp*eq-ffq;
+  }
   s_vd_out=actual_vd; s_vq_out=actual_vq; s_voltage_limit=vmax;
   pulse[0] = (uint16_t)da; pulse[1] = (uint16_t)db; pulse[2] = (uint16_t)dc;
 }
 
-/* ---- 40 kHz cycle: ADC+DMA read, FOC/SVPWM, OC trip, decimated frame ----- */
+/* Optional, deliberately slow motor-shaft speed loop for music playback.
+   The normal Q-axis music/audio waveform remains superimposed on this bounded
+   DC torque request. Reserve current headroom for the acoustic waveform. */
+static float ph_music_rotation_current(void)
+{
+  if(fabsf(s_music_speed_rpm)<0.01f) {
+    s_music_motion.initialized=0;s_music_speed_current=0.0f;return 0.0f;
+  }
+  if(++s_music_motion_div>=40u) { /* outer loop = 1 kHz */
+    s_music_motion_div=0u;
+    cff_config_t cfg=s_cfg;
+    cfg.control_mode=CFF_CTRL_VELOCITY;cfg.input_mode=CFF_INPUT_VEL_RAMP;
+    cfg.input_vel=s_music_speed_rpm*0.10471975512f;
+    cfg.limit_vel=fmaxf(fabsf(cfg.input_vel),0.01f);cfg.vel_ramp=0.35f;
+    if(!s_music_motion.initialized)
+      cff_motion_reset(&s_music_motion,(float)s_cfg.encoder_dir*s_pos,(float)s_cfg.encoder_dir*s_vel);
+    float total_limit=fminf(s_cfg.current_limit,5.0f)*s_thermal_scale;
+    float speed_limit=fmaxf(0.0f,total_limit-fabsf(s_music_amplitude));
+    s_music_speed_current=cff_motion_step(&s_music_motion,&cfg,
+      (float)s_cfg.encoder_dir*s_pos,(float)s_cfg.encoder_dir*s_vel,speed_limit,0.001f);
+  }
+  return s_music_speed_current;
+}
+
+/* ---- 25 kHz cycle: ADC sampling, FOC/SVPWM and protection ----- */
 static float ph_cal_l_trimmed_mean(void)
 {
   float sorted[PH_CAL_L_REPEATS];
@@ -1111,7 +1297,8 @@ static void ph_isr(void)
   g_ph_adc_wait = ph_clock_now() - t0;
   g_ph_cnt_rd = (uint16_t)TIM1->CNT;    /* counter position after the read */
   if ((g_ph_state != CFF_AXIS_IDLE || g_ph_mod_milli != 0u) &&
-      (uint32_t)(ph_clock_now() - s_command_cycle) > (s_command_source==2?14400000u:PH_HOST_TIMEOUT_CYCLES)) {
+      cff_mit_watchdog_expired(ph_clock_now(), s_command_cycle,
+                               (s_command_source==2?14400000u:PH_HOST_TIMEOUT_CYCLES))) {
     ph_safe_stop(CFF_FAULT_COMM);
   }
   uint8_t active_sample = (TIM1->BDTR & TIM_BDTR_MOE) != 0u;
@@ -1217,9 +1404,14 @@ static void ph_isr(void)
   }
 
   if ((g_ph_state == CFF_AXIS_CALIBRATION) ||
+      (g_ph_state == CFF_AXIS_MUSIC) ||
+      (g_ph_state == CFF_AXIS_AUDIO) ||
       (g_ph_state == CFF_AXIS_MEASURE) ||
       ((g_ph_state == CFF_AXIS_CLOSED_LOOP) && (g_ph_if_hz == 0u))) {
-    if ((!s_enc_seen) || (!g_ph_enc_ok) ||
+    /* A single failed SSC transaction must not trip the axis immediately;
+       the last accepted angle remains usable until the explicit freshness
+       deadline. Closed-loop consecutive-failure handling remains in reader. */
+    if ((!s_enc_seen) ||
         ((uint32_t)(ph_clock_now() - s_enc_cycle) > PH_ENC_MAX_AGE_CYCLES)) {
       g_ph_fault |= CFF_FAULT_ENCODER;
       g_ph_state = CFF_AXIS_IDLE;
@@ -1284,6 +1476,53 @@ static void ph_isr(void)
       elec = ph_wrap(s_observer_mech * (float)s_cfg.encoder_dir * (float)s_cfg.pole_pairs + s_cfg.encoder_offset);
     }
     ph_foc_run(elec, 0.0f, s_iq_ref, iA, iB, iC, pulse);
+  }
+  else if (g_ph_state == CFF_AXIS_MUSIC)
+  {
+    /* The music path can intentionally command up to 5 A. Keep a proportional
+       phase-peak guard with headroom for tracking ripple instead of tripping
+       at the old fixed 2 A threshold. */
+    float rotation_iq=ph_music_rotation_current();
+    float music_trip_a=fmaxf(2.0f,1.5f*(s_music_amplitude+fabsf(rotation_iq)));
+    if(peak_a>music_trip_a){if(s_music_oc<255u)s_music_oc++;}else s_music_oc=0;
+    if(s_music_oc>=5u){s_music_reason=2u;ph_safe_stop(CFF_FAULT_OVERCURRENT);}
+    else if(fabsf(s_vel)>5.0f){s_music_reason=1u;ph_safe_stop(0);}
+    else if(s_music_index>=s_music_loaded){ph_safe_stop(0);}
+    else {
+      ph_music_note_t note=s_music_notes[s_music_index];
+      uint32_t ticks=(uint32_t)note.ms*(PH_ISR_HZ/1000u);
+      float envelope=fminf(1.0f,fminf((float)s_music_tick/125.0f,(float)(ticks-s_music_tick)/125.0f));
+      s_music_phase=ph_wrap(s_music_phase+PH_TWO_PI*(float)note.hz/(float)PH_ISR_HZ);
+      float current=note.hz?s_music_amplitude*envelope*ph_sin(s_music_phase):0;
+      /* Music tone is an AC q-axis current: it creates alternating torque and
+         makes the motor acoustically louder than the low-torque d-axis path. */
+      ph_foc_run(ph_encoder_elec(),0,current+rotation_iq,iA,iB,iC,pulse);
+      if(++s_music_tick>=ticks){s_music_tick=0;s_music_phase=0;s_music_index++;}
+    }
+    if(g_ph_state!=CFF_AXIS_MUSIC){pulse[0]=pulse[1]=pulse[2]=(PH_PWM_PERIOD+1u)/2u;}
+  }
+  else if (g_ph_state == CFF_AXIS_AUDIO)
+  {
+    if((uint32_t)(ph_clock_now()-s_audio_last_cycle)>36000000u) { ph_safe_stop(CFF_FAULT_COMM); }
+    else if(fabsf(s_vel)>5.0f) { ph_safe_stop(0u); }
+    else {
+      s_audio_phase_acc+=PH_AUDIO_RATE;
+      if(s_audio_phase_acc>=PH_ISR_HZ) {
+        s_audio_phase_acc-=PH_ISR_HZ;
+        uint16_t tail=s_audio_tail;
+        if(tail!=s_audio_head) {
+          int8_t sample=s_audio_ring[tail];
+          s_audio_sample=(float)sample*(s_audio_amplitude/127.0f);
+          s_audio_tail=(uint16_t)((tail+1u)&(PH_AUDIO_RING-1u));
+        } else s_audio_sample=0.0f;
+      }
+      float rotation_iq=ph_music_rotation_current();
+      float audio_trip_a=fmaxf(0.5f,2.0f*(s_audio_amplitude+fabsf(rotation_iq)));
+      if(peak_a>audio_trip_a) { if(s_audio_oc<255u)s_audio_oc++; } else s_audio_oc=0u;
+      if(s_audio_oc>=5u) ph_safe_stop(CFF_FAULT_OVERCURRENT);
+      else ph_foc_run(ph_encoder_elec(),0.0f,s_audio_sample+rotation_iq,iA,iB,iC,pulse);
+    }
+    if(g_ph_state!=CFF_AXIS_AUDIO){pulse[0]=pulse[1]=pulse[2]=(PH_PWM_PERIOD+1u)/2u;}
   }
   else if (g_ph_state == CFF_AXIS_CALIBRATION)
   {
@@ -1616,7 +1855,7 @@ static void ph_isr(void)
   {
     s_decim = 0u;
     /* Defer float formatting and diagnostic snapshots to the main loop so
-       telemetry cannot consume the 40 kHz current-control deadline. */
+       telemetry cannot consume the 25 kHz current-control deadline. */
     s_telem_duty[0]=pulse[0];s_telem_duty[1]=pulse[1];s_telem_duty[2]=pulse[2];
     __DMB();s_telem_due=1u;
   }
@@ -1638,6 +1877,8 @@ static uint8_t ph_enc_transfer(uint16_t command, uint16_t *value, uint16_t *safe
   uint16_t w1 = 0u, w2 = 0u;
   uint8_t  err = 0xFFu;
 
+  /* Keep bounded retries: the ISR treats an invalid published sample as a
+     safety fault, so one transient SSC error must not immediately disarm. */
   for (uint8_t attempt = 0u; attempt < 3u; attempt++)
   {
     uint8_t data[4] = { 0u, 0u, 0u, 0u };
@@ -1744,36 +1985,36 @@ static void ph_enc2_read(void)
 {
   static uint32_t last_cycle;
   static float last_angle;
-  static float last_motor_pos,last_output_pos;
-  static float accum_motor,accum_output,correlation;
-  static uint8_t ratio_tracking;
   if (s_spi == NULL) return;
   uint16_t angle=0,safety=0; uint32_t cycle=0;
   uint8_t err=ph_enc_transfer(g_enc_cmd,&angle,&safety,&cycle,HAL_GPIO_PIN_6);
+  s_enc2_raw_word=angle; s_enc2_safety=safety; s_enc2_error=err;
+  /* Count transport + CRC independently of magnetic/angle status. */
+  if ((err & 0x0Bu) == 0u) { s_enc2_comm_ok++; }
   if(err || (safety&0x7000u)!=0x7000u) { s_enc2_ok=0; s_enc2_fail++; return; }
   float a=(float)(angle&0x7FFFu)*(PH_TWO_PI/32768.0f);
-  float p=s_enc2_pos, vel=0.0f;
+  float p=s_enc2_pos, vel=s_enc2_vel;
   if(last_cycle) {
     float d=a-last_angle; if(d>PH_PI)d-=PH_TWO_PI; if(d<-PH_PI)d+=PH_TWO_PI;
-    p+=d; float dt=(float)(cycle-last_cycle)/PH_FCPU; if(dt>1e-6f)vel=d/dt;
+    p+=d;
+    float dt=(float)(cycle-last_cycle)/PH_FCPU;
+    if(dt>1e-6f) {
+      /* The 15-bit encoder advances in quantized steps. A raw 500 us
+         derivative becomes a train of 0 / 0.38 rad/s pulses at slow output
+         speeds; smooth it over 20 ms before publishing the joint velocity. */
+      float alpha=dt/(0.020f+dt);
+      if(alpha>1.0f)alpha=1.0f;
+      float raw_velocity=d/dt;
+      vel+=alpha*(raw_velocity-vel);
+    }
+  } else {
+    p=a+PH_TWO_PI*roundf(((float)s_enc2_dir*s_enc2_offset-a)/PH_TWO_PI);
+    vel=0.0f;
   }
   last_cycle=cycle; last_angle=a;
-  s_enc2_pos=p; s_enc2_vel=vel; s_enc2_ok=1;
-  if(g_ph_enc_ok) {
-    if(!ratio_tracking) {
-      last_motor_pos=s_pos; last_output_pos=p; ratio_tracking=1u;
-      return;
-    }
-    float dm=(float)s_cfg.encoder_dir*(s_pos-last_motor_pos), dout=p-last_output_pos;
-    accum_motor+=fabsf(dm);
-    accum_output+=fabsf(dout);
-    correlation+=dm*dout;
-    last_motor_pos=s_pos; last_output_pos=p;
-    if(accum_output>=0.5f && accum_motor>0.01f) {
-      s_gear_ratio=accum_motor/accum_output;
-      if(fabsf(correlation)>0.01f) s_enc2_dir=(correlation>=0.0f)?1:-1;
-    }
-  }
+  s_enc2_mech=a;s_enc2_pos=p; s_enc2_vel=vel; s_enc2_ok=1;
+  if(g_ph_enc_ok && g_ph_state==CFF_AXIS_CALIBRATION && s_cal_ph==3u)
+    cff_pair_sample(&s_enc2_pair,s_pos,p);
 }
 
 /* Measure ADC zero with the motor undriven -> per-phase current offsets. */
@@ -1798,8 +2039,11 @@ void phase_test_init(void)
 {
   ph_clock_init();
   s_cfg=s_defaults;
+  float stored_ratio=0,stored_pair_quality=0;
   s_config_loaded=cff_store_load(&s_cfg,&s_calibrated,&s_cal_quality,s_cogging_map_ma,&s_cogging_valid,
-                                 &s_enc2_enabled,&s_enc2_dir,&s_enc2_offset);
+                                 &s_enc2_enabled,&s_enc2_dir,&s_enc2_offset,&stored_ratio,&stored_pair_quality);
+  s_gear_ratio=stored_ratio>0?stored_ratio:NAN;s_enc2_cal_quality=stored_pair_quality;
+  s_enc2_cal_status=s_enc2_enabled?(stored_ratio>0?5u:4u):0u;
   /* Ignore and invalidate any legacy learned map in RAM; it is no longer
      applied and a subsequent parameter save will persist the cleared map. */
   s_cogging_valid=0u;s_cogging_current_applied=0.0f;
@@ -1942,6 +2186,7 @@ void phase_test_init(void)
   s_zero_remaining = 408u;
   (void)HAL_TIM_Start_IT(tim);
   if(!cff_can_init(s_cfg.can_bitrate_kbps)) g_ph_fault|=CFF_FAULT_COMM;
+  phase_test_uart_init();
 }
 
 void phase_test_on_activate(void *cdc_instance)
@@ -1952,9 +2197,11 @@ void phase_test_on_activate(void *cdc_instance)
 
 void phase_test_on_deactivate(void)
 {
+  if(g_ph_state==CFF_AXIS_AUDIO) ph_safe_stop(CFF_FAULT_COMM);
   if(s_command_source!=2) {
     uint16_t fault=(g_ph_state!=CFF_AXIS_IDLE||g_ph_mod_milli)?CFF_FAULT_COMM:0;
-    if(fault) ph_safe_stop(fault);
+    uint8_t uart_alive = (uint32_t)(ph_clock_now()-s_uart_last_frame_cycle) < PH_HOST_TIMEOUT_CYCLES;
+    if(fault && !uart_alive) ph_safe_stop(fault);
   }
   s_cdc = NULL;
 }
@@ -1984,7 +2231,9 @@ static void ph_can_receive(uint16_t id,const uint8_t *p,uint8_t len,uint8_t remo
       return;
     }
     if(opcode==CFF_MIT_CMD_ENABLE) {
-      if(s_can_inhibit||g_ph_fault||!s_calibrated||!s_can_auto_arm||g_ph_mod_milli) return;
+      if(!cff_mit_can_enable_allowed(s_can_inhibit,(uint8_t)(g_ph_fault!=0u),
+                                     s_calibrated,s_can_auto_arm,
+                                     (uint8_t)(g_ph_state==CFF_AXIS_IDLE),g_ph_mod_milli)) return;
       cff_mit_command_t hold={0};
       hold.position_rad=ph_can_axis_position()-s_can_position_zero;
       uint32_t mask=__get_PRIMASK();__disable_irq();s_mit_command=hold;__set_PRIMASK(mask);
@@ -2059,6 +2308,18 @@ static void ph_cal_finalize_task(void)
                             cosf(error) + cosf(s_cal_forward_error));
   s_cfg.pole_pairs = s_cal_pp; s_cfg.encoder_dir = s_cal_dir;
   s_cfg.encoder_offset = ph_wrap(s_cal_offset + correction);
+  if(s_enc2_enabled) {
+    float ratio,quality;int dir;
+    if((s_enc2_error&0x0Bu)!=0u)s_enc2_cal_status=2u;
+    else if(!s_enc2_ok)s_enc2_cal_status=3u;
+    else if(!cff_pair_finish(&s_enc2_pair,&ratio,&dir,&quality)) {
+      s_enc2_cal_status=4u;s_enc2_cal_quality=quality;s_gear_ratio=NAN;
+    } else {
+      s_gear_ratio=ratio;s_enc2_dir=(int8_t)(dir*s_cfg.encoder_dir);
+      s_enc2_offset=(float)s_enc2_dir*s_enc2_pos;
+      s_enc2_cal_quality=quality;s_enc2_cal_status=5u;
+    }
+  }
   /* Slightly over-design the PI target to compensate the measured closed-loop
      bandwidth shortfall. Frequency response remains a separate operator action. */
   s_cfg.current_bandwidth=PH_TWO_PI*(float)PH_CAL_CURRENT_BW_TARGET_HZ;
@@ -2091,7 +2352,11 @@ void phase_test_task(void)
   static uint32_t enc_last = 0u;
   uint32_t enc_now = ph_clock_now();
   if ((uint32_t)(enc_now - enc_last) >= PH_ENC_PERIOD_CYCLES) {
-    enc_last = enc_now; ph_enc_read(); ph_enc2_read();
+    enc_last = enc_now;
+    ph_enc_read();
+    /* The output encoder is optional. Reading an uninstalled device every
+       500 us causes repeated SPI timeouts and can starve USB heartbeat parse. */
+    if (s_enc2_enabled) { ph_enc2_read(); }
   }
 
   UX_SLAVE_CLASS_CDC_ACM *cdc = s_cdc;
@@ -2103,26 +2368,38 @@ void phase_test_task(void)
     __set_PRIMASK(primask);
     ph_tx_telem(s_adc_dma[0],s_adc_dma[1],s_adc_dma[2],duties[0],duties[1],duties[2]);
   }
-  if (cdc == NULL) { return; }
-
+  uint16_t rx_head = s_uart_rx_head;
+  uint16_t rx_tail = s_uart_rx_tail;
+  uint16_t rx_n = 0u;
+  while (rx_tail != rx_head && rx_n < sizeof(s_uart_rxbuf)) {
+    s_uart_rxbuf[rx_n++] = s_uart_rxring[rx_tail];
+    rx_tail = (uint16_t)((rx_tail + 1u) & (PH_UART_RXRING - 1u));
+  }
+  s_uart_rx_tail = rx_tail;
+  if (s_uart_rx_overflow) { s_uart_parser.len = 0u; s_uart_rx_overflow = 0u; }
+  if (rx_n) { ph_parse_rx(&s_uart_parser, s_uart_rxbuf, rx_n); }
   if (s_telem_pending) {
-    uint8_t q[CFF_TELEM_LEN], raw[CFF_CURRENT_RAW_LEN], control[50], axis[62];
+    uint8_t q[CFF_TELEM_LEN], raw[CFF_CURRENT_RAW_LEN], control[50], axis[62], encoders[36];
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
     memcpy(q, s_telem_mail, sizeof(q));
     memcpy(raw, s_raw_mail, sizeof(raw));
     memcpy(control, s_control_mail, sizeof(control));
     memcpy(axis,s_axis_mail,sizeof(axis));
+    memcpy(encoders,s_encoders_mail,sizeof(encoders));
     s_telem_pending = 0u;
     __set_PRIMASK(primask);
     ph_tx_frame(CFF_MSG_AXIS_DIAG,axis,sizeof(axis));
+    ph_tx_frame(CFF_MSG_ENCODERS,encoders,sizeof(encoders));
     ph_tx_frame(CFF_MSG_CURRENT_RAW, raw, sizeof(raw));
     ph_tx_frame(CFF_MSG_CONTROL_DIAG, control, sizeof(control));
     ph_tx_frame(CFF_MSG_TELEMETRY, q, sizeof(q));
   }
 
+  if (cdc == NULL) { return; }
+
   st = ux_device_class_cdc_acm_read_run(cdc, s_rxbuf, (ULONG)sizeof(s_rxbuf), &actual);
-  if ((st == UX_STATE_NEXT) && (actual > 0u)) { ph_parse_rx(s_rxbuf, actual); }
+  if ((st == UX_STATE_NEXT) && (actual > 0u)) { ph_parse_rx(&s_usb_parser, s_rxbuf, actual); }
 
   if (s_tx_busy == 0u)
   {
@@ -2159,6 +2436,56 @@ void TIM1_UPD_IRQHandler(void)
     TIM1->SR = ~TIM_SR_UIF;
     ph_isr();
   }
+}
+
+/* UART4 interrupt keeps 921600-baud traffic independent of the 25 kHz FOC
+   loop. RX bytes are queued for protocol parsing from the main loop; TX only
+   drains an already-framed byte queue. */
+void UART4_IRQHandler(void)
+{
+  uint32_t isr = UART4->ISR;
+  while (UART4->ISR & USART_ISR_RXNE_RXFNE) {
+    uint8_t b = (uint8_t)UART4->RDR;
+    uint16_t head = s_uart_rx_head;
+    uint16_t next = (uint16_t)((head + 1u) & (PH_UART_RXRING - 1u));
+    if (next != s_uart_rx_tail) {
+      s_uart_rxring[head] = b;
+      s_uart_rx_head = next;
+    } else {
+      s_uart_rx_overflow = 1u;
+    }
+  }
+  if ((isr & USART_ISR_TXE_TXFNF) && (UART4->CR1 & USART_CR1_TXEIE_TXFNFIE)) {
+    uint16_t tail = s_uart_tx_tail;
+    if (tail != s_uart_tx_head) {
+      UART4->TDR = s_uart_txring[tail];
+      s_uart_tx_tail = (uint16_t)((tail + 1u) & (PH_UART_TXRING - 1u));
+    } else {
+      UART4->CR1 &= ~USART_CR1_TXEIE_TXFNFIE;
+    }
+  }
+  if (isr & (USART_ISR_ORE | USART_ISR_FE | USART_ISR_NE)) {
+    UART4->ICR = USART_ICR_ORECF | USART_ICR_FECF | USART_ICR_NECF;
+  }
+}
+
+void phase_test_uart_init(void)
+{
+  s_uart_tx_head = s_uart_tx_tail = 0u;
+  s_uart_rx_head = s_uart_rx_tail = 0u;
+  s_uart_last_frame_cycle = ph_clock_now() - PH_HOST_TIMEOUT_CYCLES - 1u;
+  /* HAL_UART_Init() only initializes the handle. HAL_UART_SetConfig() keeps
+     UE clear when the peripheral was disabled on entry, so explicitly enable
+     UART4 before using its interrupt-driven RX/TX path. */
+  /* At 921600 bit/s bytes arrive every 10.9 us, faster than an active FOC
+     ISR can guarantee service. Buffer whole command bursts in hardware. */
+  UART4->CR1 &= ~USART_CR1_UE;
+  UART4->CR1 |= USART_CR1_FIFOEN;
+  UART4->CR1 |= USART_CR1_UE;
+  UART4->CR1 |= USART_CR1_RXNEIE_RXFNEIE;
+  HAL_CORTEX_NVIC_SetPriority(UART4_IRQn, HAL_CORTEX_NVIC_PREEMP_PRIORITY_5,
+                              HAL_CORTEX_NVIC_SUB_PRIORITY_0);
+  HAL_CORTEX_NVIC_EnableIRQ(UART4_IRQn);
 }
 
 void HAL_TIM_UpdateCallback(hal_tim_handle_t *htim)

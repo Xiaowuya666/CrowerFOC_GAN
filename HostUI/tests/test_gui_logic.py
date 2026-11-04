@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt5 import QtCore, QtWidgets
 from crowerfoc_gui import MainWindow
-from crowerfoc_transport import SerialWorker
+from crowerfoc_transport import SerialWorker, HEARTBEAT_INTERVAL
 from crowerfoc_protocol import *
 
 APP = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -28,6 +28,40 @@ def telemetry(state=1, flags=6, angle=35999, seq=0, fault=0):
 
 
 class TransportTests(unittest.TestCase):
+    def test_heartbeat_continues_when_telemetry_is_stale(self):
+        class FakeSerial:
+            def __init__(self):
+                self.writes = []
+            def write(self, packet):
+                self.writes.append(bytes(packet))
+                return len(packet)
+
+        r = SerialWorker("test")
+        r.sp = FakeSerial()
+        r.last_telem = 1.0
+        next_heartbeat = r._heartbeat_tick(10.0, 0.0)
+        self.assertEqual(r.sp.writes, [encode_frame(MSG_HEARTBEAT)])
+        self.assertEqual(next_heartbeat, 10.0 + HEARTBEAT_INTERVAL)
+        r.last_telem = 0.0
+        next_heartbeat = r._heartbeat_tick(next_heartbeat, next_heartbeat)
+        self.assertEqual(len(r.sp.writes), 2)
+        self.assertEqual(r.sp.writes[-1], encode_frame(MSG_HEARTBEAT))
+
+    def test_encoder_pair_packet_is_sequence_matched_and_unit_converted(self):
+        r=SerialWorker('test')
+        values=(.1,.2,.3,.4,.5,.6,.7,9.5)
+        r._dispatch(MSG_ENCODERS,struct.pack('<H8fBB',7,*values,15,5))
+        r._dispatch(MSG_TELEMETRY,telemetry(seq=7))
+        self.assertAlmostEqual(r.latest['enc1_ang'],.1*180/3.141592653589793,places=6)
+        self.assertAlmostEqual(r.latest['enc2_ang'],.5*180/3.141592653589793,places=6)
+        self.assertAlmostEqual(r.latest['enc2_pos'],.6*180/3.141592653589793,places=5)
+        self.assertAlmostEqual(r.latest['enc2_vel'],.7*60/6.283185307179586,places=6)
+        self.assertAlmostEqual(r.latest['encoder_ratio'],9.5)
+        self.assertEqual(r.latest['encoder2_calibration'],5)
+        r._dispatch(MSG_ENCODERS,struct.pack('<H8fBB',8,*values,15,5))
+        r._dispatch(MSG_TELEMETRY,telemetry(seq=9))
+        self.assertTrue(np.isnan(r.latest['enc2_ang']))
+
     def test_control_diagnostics_require_matching_sequence_and_finite_values(self):
         r = SerialWorker('test')
         values = [float(i) for i in range(12)]
@@ -375,7 +409,10 @@ class WorkflowTests(unittest.TestCase):
         self.w.tick()
         self.assertIs(self.w.main_splitter.widget(0),self.w.live_monitor)
         self.assertIs(self.w.main_splitter.widget(1),self.w.workspaces)
-        self.assertEqual(self.w.workspaces.count(),5)
+        self.assertEqual(self.w.workspaces.count(),6)
+        self.assertEqual(len(self.w.pw_mot2.listDataItems()),1)
+        self.assertEqual(len(self.w.pw_vel2.listDataItems()),1)
+        self.assertEqual(len(self.w.pw_pos2.listDataItems()),1)
         self.assertEqual(self.w.lb_rate.text(), "速率 --")
         _, phase_a=self.w.c_cur_live['ia'].getData()
         _, current_d=self.w.c_dq_live['id'].getData()

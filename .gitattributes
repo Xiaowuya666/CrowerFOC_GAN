@@ -6,3 +6,5 @@
 *.elf binary
 *.bin binary
 *.hex binary
+*.epro2 binary
+*.mid binary

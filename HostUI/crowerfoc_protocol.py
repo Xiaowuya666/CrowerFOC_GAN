@@ -10,6 +10,11 @@ MSG_CURRENT_RAW = 0x06
 MSG_CURRENT_TRACE = 0x07
 MSG_CONTROL_DIAG = 0x08
 MSG_AXIS_DIAG = 0x0A
+MSG_ENCODERS = 0x0B
+ENCODER_FIELDS = ('enc1_ang','enc1_pos','enc1_vel','enc1_elec',
+                  'enc2_ang','enc2_pos','enc2_vel','encoder_ratio')
+MSG_MUSIC = 0x8A
+MSG_AUDIO = 0x8B
 MSG_CONFIG_PATCH = 0x89
 CONTROL_FIELDS = ('id_target_A', 'iq_target_A', 'vd_V', 'vq_V', 'park_deg',
                   'pwm_deg', 'observer_deg', 'velocity_raw', 'angle_age_us',
@@ -18,7 +23,7 @@ MSG_HEARTBEAT = 0x88
 MSG_SET, MSG_GET, MSG_STATE, MSG_SETPOINT, MSG_SAVE, MSG_CLEAR, MSG_REBOOT = \
     0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87
 
-AXIS_STATES = ["未定义", "空闲", "校准中", "闭环控制", "错误", "参数测量"]
+AXIS_STATES = ["未定义", "空闲", "校准中", "闭环控制", "错误", "参数测量", "电机音乐", "电脑音频"]
 CTRL_MODES = ["力矩", "速度", "位置"]
 INPUT_MODES = ["无效", "直通", "速度斜坡", "位置滤波", "梯形轨迹"]
 
